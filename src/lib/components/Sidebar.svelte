@@ -7,7 +7,7 @@
 
 <nav>
   <section id="sidebar__header">
-    <h1 title="LunaHook — Rust Bridge">鉤</h1>
+    <h1 title="Kiroku (記録) — Text Hook Bridge">記</h1>
     <div id="sidebar__header__buttons">
       <SidebarButton
         active={appStore.activeTab === 'console'}

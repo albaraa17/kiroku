@@ -144,6 +144,7 @@ pub struct AppConfig {
     pub remove_repeated_phrases: bool,
     pub strip_html_ruby_tags: bool,
     pub remove_speaker_brackets: bool,
+    pub filter_chinese_segments: bool,
     pub normalize_whitespace: bool,
     pub hide_garbage_threads: bool,
 
@@ -183,7 +184,8 @@ impl Default for AppConfig {
             remove_repeated_chars: true,
             remove_repeated_phrases: true,
             strip_html_ruby_tags: true,
-            remove_speaker_brackets: false,
+            remove_speaker_brackets: true,
+            filter_chinese_segments: true,
             normalize_whitespace: true,
             hide_garbage_threads: false,
 

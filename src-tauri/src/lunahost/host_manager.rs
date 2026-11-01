@@ -3,7 +3,9 @@ use crate::lunahost::ffi::{
 };
 use crate::lunahost::injector::inject_lunahook_dll;
 use crate::pipeline::{cleaner::clean_sentence, scorer::score_thread_text};
-use crate::process::window_list::{get_icon_cached, list_windowed_processes, query_process_info};
+use crate::process::window_list::{
+    get_icon_cached, list_windowed_processes_fast, query_process_info, write_luna_game_bridge_json,
+};
 use crate::store::config::{AppConfig, SavedHookContext, same_game_path};
 use crate::websocket::{
     exstatic_server::{ExStaticBroadcastServer, ExStaticSentencePayload},
@@ -421,6 +423,7 @@ impl HostManager {
                 pid, url_to_use
             ));
             self.ensure_knife_thread_created(pid);
+            self.sync_game_bridge_file();
             self.emit_state();
             return Ok(());
         }
@@ -487,6 +490,7 @@ impl HostManager {
             pid,
             if is_64bit { "x64" } else { "x86" }
         ));
+        self.sync_game_bridge_file();
         self.emit_state();
         Ok(())
     }
@@ -538,6 +542,7 @@ impl HostManager {
             }
         }
 
+        self.sync_game_bridge_file();
         self.emit_state();
     }
 
@@ -548,7 +553,21 @@ impl HostManager {
         }
         self.threads.write().clear();
         *self.selected_thread_key.write() = None;
+        self.sync_game_bridge_file();
         self.emit_state();
+    }
+
+    fn sync_game_bridge_file(&self) {
+        let attached = self.attached.read();
+        if let Some(proc_info) = attached
+            .values()
+            .find(|p| !p.is_knife)
+            .or_else(|| attached.values().next())
+        {
+            write_luna_game_bridge_json(proc_info.pid, &proc_info.name, "");
+        } else {
+            write_luna_game_bridge_json(0, "", "");
+        }
     }
 
     pub fn select_thread(&self, key: Option<String>, remember_for_exe: bool) {
@@ -800,6 +819,7 @@ impl HostManager {
                         }
                     }
                 }
+                self.sync_game_bridge_file();
                 self.emit_state();
             }
             HostEvent::ProcessDisconnected(pid) => {
@@ -817,6 +837,7 @@ impl HostManager {
                     *self.selected_thread_key.write() = None;
                 }
                 self.push_log(format!("Process {} disconnected.", pid));
+                self.sync_game_bridge_file();
                 self.emit_state();
             }
             HostEvent::ThreadCreated {
@@ -1066,7 +1087,7 @@ impl HostManager {
                 return (pid, path.clone());
             }
         }
-        for p in list_windowed_processes(&[]) {
+        for p in list_windowed_processes_fast(&[]) {
             if p.is_knife {
                 *cache = Some((Instant::now(), p.pid, p.exe_path.clone()));
                 return (p.pid, p.exe_path);
@@ -1085,7 +1106,7 @@ impl HostManager {
                 if !cfg.auto_attach || !mgr.attached.read().is_empty() {
                     continue;
                 }
-                let procs = list_windowed_processes(&cfg.auto_attach_exes);
+                let procs = list_windowed_processes_fast(&cfg.auto_attach_exes);
                 let live_pids: HashSet<u32> = procs.iter().map(|p| p.pid).collect();
                 mgr.user_detached_pids
                     .write()

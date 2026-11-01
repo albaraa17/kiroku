@@ -25,7 +25,7 @@
   <Sidebar />
   <div data-tauri-drag-region class="titlebar">
     <div data-tauri-drag-region class="titlebar-info">
-      <span class="brand-pill">LUNA-RUST</span>
+      <span class="brand-pill">KIROKU 記録</span>
       <span class="status-dot" class:online={appStore.snapshot.ws_clients > 0}></span>
       <span class="status-label">
         exSTATic WS :{appStore.snapshot.ws_port} ({appStore.snapshot.ws_clients} client{appStore.snapshot.ws_clients === 1 ? '' : 's'})

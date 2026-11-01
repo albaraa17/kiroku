@@ -74,6 +74,7 @@ export interface AppConfig {
   remove_repeated_phrases: boolean;
   strip_html_ruby_tags: boolean;
   remove_speaker_brackets: boolean;
+  filter_chinese_segments: boolean;
   normalize_whitespace: boolean;
   hide_garbage_threads: boolean;
 

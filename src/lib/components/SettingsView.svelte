@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { open } from '@tauri-apps/plugin-dialog';
   import { invoke } from '@tauri-apps/api/core';
   import { toast } from 'svelte-sonner';
   import { appStore } from '$lib/stores/app.svelte';
@@ -7,6 +6,7 @@
   import type { AppConfig } from '$lib/types';
 
   let testSentence = $state('「これはテスト文です。exSTATicへ送信します。」');
+  let fileInputEl = $state<HTMLInputElement | null>(null);
 
   async function updateConfigField<K extends keyof AppConfig>(
     key: K,
@@ -41,25 +41,26 @@
     });
   }
 
-  async function handleImportLegacyFile() {
+  function handleImportLegacyFile() {
+    fileInputEl?.click();
+  }
+
+  async function onLegacyFileChosen(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
     try {
-      const selected = await open({
-        multiple: false,
-        filters: [
-          {
-            name: 'LunaHost / Textractor Config',
-            extensions: ['json', 'txt'],
-          },
-        ],
-      });
-      if (!selected || typeof selected !== 'string') return;
+      const content = await file.text();
       const updated = await invoke<AppConfig>('import_legacy_config_file', {
-        path: selected,
+        path: file.name,
+        content,
       });
       appStore.config = updated;
-      toast.success('Successfully imported legacy hooks & filters!');
+      toast.success(`Imported ${file.name} into Kiroku!`);
     } catch (err) {
       toast.error(`Import failed: ${err}`);
+    } finally {
+      input.value = '';
     }
   }
 </script>
@@ -67,12 +68,19 @@
 <div class="settings-root">
   <header class="settings-header">
     <div>
-      <h2><i class="fa-solid fa-gear"></i> Hook Engine, WebSocket & Theme Settings</h2>
+      <h2><i class="fa-solid fa-gear"></i> Kiroku — Engine, WebSocket & Theme Settings</h2>
       <p>
-        Customize LunaHost hooking parameters (flush delay, codepage, buffers), exSTATic / Knife WebSocket ports, and Tadoku themes.
+        Powered by LunaHook & Knife. Customize hooking parameters (flush delay, codepage, buffers), exSTATic / Knife WebSocket ports, and Tadoku themes.
       </p>
     </div>
 
+    <input
+      bind:this={fileInputEl}
+      type="file"
+      accept=".json,.txt"
+      style="display: none"
+      onchange={onLegacyFileChosen}
+    />
     <button class="import-btn" onclick={handleImportLegacyFile}>
       <i class="fa-solid fa-file-import"></i> Import config64.json / SavedRegexFilters.txt
     </button>

@@ -39,6 +39,7 @@
       | 'remove_repeated_phrases'
       | 'strip_html_ruby_tags'
       | 'remove_speaker_brackets'
+      | 'filter_chinese_segments'
       | 'normalize_whitespace',
   ) {
     if (!appStore.config) return;
@@ -195,14 +196,29 @@
 
           <div class="toggle-row">
             <div>
-              <strong>Strip Leading Speaker Brackets</strong>
-              <p>Removes speaker prefixes like <code>【アルクェイド】</code> at the start of lines</p>
+              <strong>Strip Speaker Prefixes & Brackets</strong>
+              <p>Removes speaker prefixes like <code>【アルク】</code> or <code>小鳥 「…」</code> before dialogue brackets</p>
             </div>
             <label class="switch">
               <input
                 type="checkbox"
                 checked={appStore.config.remove_speaker_brackets}
                 onchange={() => toggleFlag('remove_speaker_brackets')}
+              />
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="toggle-row">
+            <div>
+              <strong>Filter Dual-Language Chinese Segments</strong>
+              <p>Strips Chinese translation clauses in bilingual VNs (e.g. <code>「おはよう！」早上好！</code> → <code>「おはよう！」</code>)</p>
+            </div>
+            <label class="switch">
+              <input
+                type="checkbox"
+                checked={appStore.config.filter_chinese_segments}
+                onchange={() => toggleFlag('filter_chinese_segments')}
               />
               <span class="slider"></span>
             </label>

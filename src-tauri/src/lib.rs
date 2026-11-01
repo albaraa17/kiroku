@@ -141,8 +141,20 @@ fn copy_to_clipboard(text: String) -> Result<(), String> {
 fn import_legacy_config_file(
     mgr: State<'_, Arc<HostManager>>,
     path: String,
+    content: Option<String>,
 ) -> Result<AppConfig, String> {
-    let p = PathBuf::from(&path);
+    let p = if let Some(raw_text) = content {
+        let ext = if path.to_lowercase().ends_with(".json") {
+            "json"
+        } else {
+            "txt"
+        };
+        let tmp = std::env::temp_dir().join(format!("kiroku_import_tmp.{}", ext));
+        std::fs::write(&tmp, raw_text).map_err(|e| e.to_string())?;
+        tmp
+    } else {
+        PathBuf::from(&path)
+    };
     let mut cfg = mgr.config.read().clone();
     if path.to_lowercase().ends_with(".json") {
         cfg.import_legacy_config64(&p).map_err(|e| e.to_string())?;
@@ -155,13 +167,13 @@ fn import_legacy_config_file(
 }
 
 fn setup_tray(app: &AppHandle) -> anyhow::Result<()> {
-    let show_i = MenuItem::with_id(app, "show", "Open LunaHook Bridge", true, None::<&str>)?;
-    let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let show_i = MenuItem::with_id(app, "show", "Open Kiroku", true, None::<&str>)?;
+    let quit_i = MenuItem::with_id(app, "quit", "Quit Kiroku", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show_i, &quit_i])?;
 
     let mut builder = TrayIconBuilder::new()
         .menu(&menu)
-        .tooltip("LunaHook — Rust Bridge")
+        .tooltip("Kiroku (記録) — Text Hook Bridge")
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => {
                 if let Some(w) = app.get_webview_window("main") {
@@ -212,7 +224,7 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .unwrap_or_else(|_| PathBuf::from("."));
-            let config_path = app_data_dir.join("luna_rust_config.json");
+            let config_path = app_data_dir.join("kiroku_config.json");
 
             let mgr = HostManager::init(handle.clone(), config_path)?;
             app.manage(mgr);

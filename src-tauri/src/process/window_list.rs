@@ -127,6 +127,14 @@ pub fn get_icon_cached(exe_path: &str) -> Option<String> {
 }
 
 pub fn list_windowed_processes(saved_exes: &[String]) -> Vec<ProcessEntry> {
+    list_windowed_processes_inner(saved_exes, true)
+}
+
+pub fn list_windowed_processes_fast(saved_exes: &[String]) -> Vec<ProcessEntry> {
+    list_windowed_processes_inner(saved_exes, false)
+}
+
+fn list_windowed_processes_inner(saved_exes: &[String], include_icons: bool) -> Vec<ProcessEntry> {
     let mut ctx = EnumContext {
         entries: Vec::new(),
     };
@@ -164,7 +172,11 @@ pub fn list_windowed_processes(saved_exes: &[String]) -> Vec<ProcessEntry> {
         let name_lower = name.to_lowercase();
         let is_saved = saved_exes.iter().any(|saved| same_game_path(saved, &exe_path));
         let is_knife = name_lower == "knife.exe";
-        let icon_data_url = get_icon_cached(&exe_path);
+        let icon_data_url = if include_icons {
+            get_icon_cached(&exe_path)
+        } else {
+            None
+        };
 
         results.push(ProcessEntry {
             pid,
@@ -187,4 +199,48 @@ pub fn list_windowed_processes(saved_exes: &[String]) -> Vec<ProcessEntry> {
     });
 
     results
+}
+
+pub fn get_window_title_for_pid(target_pid: u32) -> Option<String> {
+    if target_pid == 0 {
+        return None;
+    }
+    let mut ctx = EnumContext {
+        entries: Vec::new(),
+    };
+    unsafe {
+        EnumWindows(
+            Some(enum_windows_proc),
+            (&mut ctx as *mut EnumContext) as LPARAM,
+        );
+    }
+    ctx.entries
+        .into_iter()
+        .find(|(pid, title)| *pid == target_pid && !title.is_empty())
+        .map(|(_, title)| title)
+}
+
+pub fn write_luna_game_bridge_json(pid: u32, exe: &str, title: &str) {
+    let bridge_path = std::env::temp_dir().join("luna_game_bridge.json");
+    let resolved_title = if (title.is_empty() || title.eq_ignore_ascii_case(exe)) && pid > 0 {
+        get_window_title_for_pid(pid).unwrap_or_else(|| title.to_string())
+    } else {
+        title.to_string()
+    };
+
+    let payload = serde_json::json!({
+        "exe": exe,
+        "title": resolved_title,
+        "pid": pid,
+    });
+
+    if let Ok(json_str) = serde_json::to_string(&payload) {
+        let tmp_path = bridge_path.with_extension("json.tmp");
+        if std::fs::write(&tmp_path, &json_str).is_ok() {
+            let _ = std::fs::rename(&tmp_path, &bridge_path)
+                .or_else(|_| std::fs::write(&bridge_path, &json_str));
+        } else {
+            let _ = std::fs::write(&bridge_path, &json_str);
+        }
+    }
 }
