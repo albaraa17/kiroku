@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# SvelteKit & Build outputs
+.svelte-kit/
+build/
+dist/
+
+# Rust & Tauri build artifacts
+src-tauri/target/
+**/target/
+**/*.rs.bk
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# IDE & Editor files
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# OS metadata
+.DS_Store
+Thumbs.db

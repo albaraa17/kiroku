@@ -1,0 +1,33 @@
+{
+  "name": "luna-rust",
+  "version": "1.0.0",
+  "description": "Lightweight LunaHook bridge for exSTATic and Tadoku",
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+    "tauri": "tauri"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@fontsource-variable/noto-sans-jp": "^5.2.10",
+    "@fortawesome/fontawesome-free": "^7.3.0",
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-opener": "^2.5.4",
+    "svelte-sonner": "^1.1.1"
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-static": "^3.0.10",
+    "@sveltejs/kit": "^2.69.3",
+    "@sveltejs/vite-plugin-svelte": "^7.2.0",
+    "@tauri-apps/cli": "^2.11.4",
+    "@types/node": "^26.1.1",
+    "svelte": "^5.56.4",
+    "svelte-check": "^4.7.2",
+    "typescript": "~5.9.3",
+    "vite": "^8.1.4"
+  }
+}

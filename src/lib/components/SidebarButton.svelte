@@ -1,0 +1,171 @@
+<script lang="ts">
+  import type { Snippet } from 'svelte';
+
+  interface Props {
+    text?: string;
+    image?: string | null;
+    style?: string;
+    tooltip: string;
+    active?: boolean;
+    badge?: string | number | null;
+    children?: Snippet;
+    onclick: (_event: MouseEvent) => void;
+    oncontextmenu?: (_event: MouseEvent) => void;
+  }
+
+  let {
+    text = '',
+    image = null,
+    style = '',
+    tooltip = '',
+    active = false,
+    badge = null,
+    children,
+    onclick = () => {},
+    oncontextmenu = () => {},
+  }: Props = $props();
+</script>
+
+<div class="sidebar-button-wrapper" class:active {style}>
+  <span id="border"></span>
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div id="btn" {onclick} {oncontextmenu}>
+    <div id="btn__content">
+      {#if image}
+        <img src={image} alt="icon" />
+      {:else if text}
+        {text}
+      {:else}
+        {@render children?.()}
+      {/if}
+    </div>
+    {#if badge !== null && badge !== undefined && badge !== 0 && badge !== ''}
+      <span class="badge">{badge}</span>
+    {/if}
+  </div>
+  {#if tooltip}
+    <span class="tooltip" role="tooltip">{tooltip}</span>
+  {/if}
+</div>
+
+<style>
+  .sidebar-button-wrapper {
+    width: 100%;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    position: relative;
+
+    &.active #border,
+    &:hover #border {
+      opacity: 1;
+    }
+
+    &.active #btn {
+      background: color-mix(in srgb, var(--primary) 28%, transparent);
+      border-color: color-mix(in srgb, var(--primary) 45%, transparent);
+    }
+
+    &:hover .tooltip {
+      opacity: 1;
+      transition-delay: 200ms;
+    }
+  }
+
+  #btn {
+    width: 56px;
+    height: 56px;
+    border: 0;
+    color: var(--main-text);
+    overflow: visible;
+    position: relative;
+    background: rgba(185, 154, 250, 0.17);
+    border-radius: var(--big-radius);
+    box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(185, 154, 250, 0.13);
+    transition: all 0.2s ease;
+  }
+
+  #btn__content {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    font-size: 20px;
+
+    & img {
+      height: 58%;
+      width: 58%;
+      border-radius: 6px;
+      object-fit: contain;
+    }
+  }
+
+  .badge {
+    position: absolute;
+    top: -5px;
+    right: -5px;
+    background: var(--primary);
+    color: #111;
+    font-size: 11px;
+    font-weight: 700;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 99px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+  }
+
+  #border {
+    height: 28px;
+    width: 3px;
+    opacity: 0;
+    border-radius: 0px 8px 8px 0px;
+    background-color: var(--secondary);
+    margin-right: 10px;
+    transition: opacity 0.2s ease-in-out;
+  }
+
+  .tooltip {
+    position: absolute;
+    left: calc(100% + 12px);
+    top: 50%;
+    transform: translateY(-50%);
+    background: var(--accent);
+    color: var(--main-text);
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 500;
+    white-space: nowrap;
+    z-index: 9999;
+    pointer-events: none;
+    user-select: none;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+    box-shadow:
+      0 4px 12px rgba(0, 0, 0, 0.4),
+      0 2px 4px rgba(0, 0, 0, 0.2);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+  }
+
+  .tooltip::before {
+    content: '';
+    position: absolute;
+    left: -6px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 0;
+    height: 0;
+    border-top: 6px solid transparent;
+    border-bottom: 6px solid transparent;
+    border-right: 6px solid var(--accent);
+  }
+</style>
