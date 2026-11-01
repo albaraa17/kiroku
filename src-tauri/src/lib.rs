@@ -166,6 +166,34 @@ fn import_legacy_config_file(
     Ok(mgr.config.read().clone())
 }
 
+#[tauri::command]
+fn minimize_to_tray_zero_ram(app: AppHandle) -> Result<(), String> {
+    if !TRAY_READY.load(Ordering::Relaxed) {
+        return Err("System tray icon is not initialized.".to_string());
+    }
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.destroy();
+    }
+    Ok(())
+}
+
+fn show_or_recreate_main_window(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+        return;
+    }
+    if let Some(win_cfg) = app.config().app.windows.first() {
+        if let Ok(builder) = tauri::WebviewWindowBuilder::from_config(app, win_cfg) {
+            if let Ok(w) = builder.build() {
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }
+    }
+}
+
 fn setup_tray(app: &AppHandle) -> anyhow::Result<()> {
     let show_i = MenuItem::with_id(app, "show", "Open Kiroku", true, None::<&str>)?;
     let quit_i = MenuItem::with_id(app, "quit", "Quit Kiroku", true, None::<&str>)?;
@@ -176,11 +204,7 @@ fn setup_tray(app: &AppHandle) -> anyhow::Result<()> {
         .tooltip("Kiroku (記録) — Text Hook Bridge")
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => {
-                if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.show();
-                    let _ = w.unminimize();
-                    let _ = w.set_focus();
-                }
+                show_or_recreate_main_window(app);
             }
             "quit" => {
                 if let Some(mgr) = app.try_state::<Arc<HostManager>>() {
@@ -198,11 +222,7 @@ fn setup_tray(app: &AppHandle) -> anyhow::Result<()> {
             } = event
             {
                 let app = tray.app_handle();
-                if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.show();
-                    let _ = w.unminimize();
-                    let _ = w.set_focus();
-                }
+                show_or_recreate_main_window(app);
             }
         });
 
@@ -216,7 +236,7 @@ fn setup_tray(app: &AppHandle) -> anyhow::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let handle = app.handle().clone();
@@ -227,23 +247,30 @@ pub fn run() {
             let config_path = app_data_dir.join("kiroku_config.json");
 
             let mgr = HostManager::init(handle.clone(), config_path)?;
+            let start_min_cfg = mgr.config.read().start_minimized;
             app.manage(mgr);
 
             if let Err(e) = setup_tray(&handle) {
                 log::warn!("Tray icon initialization failed: {}", e);
             }
+
+            let launched_minimized = std::env::args().any(|a| a == "--minimized") || start_min_cfg;
+            if !launched_minimized || !TRAY_READY.load(Ordering::Relaxed) {
+                show_or_recreate_main_window(&handle);
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
+            if let WindowEvent::CloseRequested { .. } = event {
                 let app = window.app_handle();
                 if let Some(mgr) = app.try_state::<Arc<HostManager>>() {
                     let minimize_to_tray = mgr.config.read().minimize_to_tray;
                     if minimize_to_tray && TRAY_READY.load(Ordering::Relaxed) {
-                        api.prevent_close();
-                        let _ = window.hide();
+                        // Allow the WebView window to close & destroy itself (Zero-RAM Tray Mode).
+                        // `RunEvent::ExitRequested` below prevents the Rust process from exiting.
                     } else {
                         mgr.detach_all();
+                        app.exit(0);
                     }
                 }
             }
@@ -264,7 +291,18 @@ pub fn run() {
             broadcast_test_sentence,
             copy_to_clipboard,
             import_legacy_config_file,
+            minimize_to_tray_zero_ram,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|_app_handle, event| {
+        if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+            // When `code.is_none()`, the last WebView window was destroyed to enter Zero-RAM Tray Mode.
+            // Keep the native Rust process and tray icon alive until `app.exit(0)` is explicitly called.
+            if code.is_none() && TRAY_READY.load(Ordering::Relaxed) {
+                api.prevent_exit();
+            }
+        }
+    });
 }

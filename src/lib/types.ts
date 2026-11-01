@@ -60,11 +60,14 @@ export interface AppConfig {
   filter_repetition: boolean;
   auto_attach: boolean;
   auto_attach_saved_only: boolean;
+  auto_select_best_hook: boolean;
 
   ws_broadcast_enabled: boolean;
   ws_broadcast_port: number;
   to_clipboard: boolean;
   minimize_to_tray: boolean;
+  start_on_boot: boolean;
+  start_minimized: boolean;
 
   knife_ws_enabled: boolean;
   knife_ws_url: string;

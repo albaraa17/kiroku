@@ -7,10 +7,19 @@
   import Sidebar from '$lib/components/Sidebar.svelte';
   import { Toaster } from 'svelte-sonner';
   import { appStore } from '$lib/stores/app.svelte';
+  import { invoke } from '@tauri-apps/api/core';
 
   const { children }: { children: Snippet } = $props();
 
   useWindowTitlebar();
+
+  async function enterZeroRamTrayMode() {
+    try {
+      await invoke('minimize_to_tray_zero_ram');
+    } catch {
+      // ignore
+    }
+  }
 
   onMount(async () => {
     await appStore.init();
@@ -37,6 +46,14 @@
       {/if}
     </div>
     <div class="titlebar-actions">
+      <button
+        type="button"
+        class="tray-mode-btn"
+        onclick={enterZeroRamTrayMode}
+        title="Minimize to System Tray (Zero-RAM Mode — unloads WebView2)"
+      >
+        <i class="fa-solid fa-feather"></i> Tray
+      </button>
       <div class="titlebar-button" id="titlebar-minimize">
         <img src="minimize.svg" alt="minimize" />
       </div>
@@ -127,6 +144,25 @@
   .titlebar-actions {
     display: flex;
     align-items: center;
+  }
+
+  .tray-mode-btn {
+    background: rgba(187, 154, 247, 0.14);
+    color: var(--secondary);
+    border: 1px solid rgba(187, 154, 247, 0.28);
+    border-radius: 6px;
+    padding: 2px 8px;
+    margin-right: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    transition: all 0.15s ease;
+    &:hover {
+      background: rgba(187, 154, 247, 0.28);
+    }
   }
 
   .content {

@@ -127,12 +127,15 @@ pub struct AppConfig {
     pub filter_repetition: bool,
     pub auto_attach: bool,
     pub auto_attach_saved_only: bool,
+    pub auto_select_best_hook: bool,
 
     // 2. Output & Bridge Settings
     pub ws_broadcast_enabled: bool,
     pub ws_broadcast_port: u16,
     pub to_clipboard: bool,
     pub minimize_to_tray: bool,
+    pub start_on_boot: bool,
+    pub start_minimized: bool,
 
     // 3. Knife & External WebSocket Input Settings
     pub knife_ws_enabled: bool,
@@ -171,11 +174,14 @@ impl Default for AppConfig {
             filter_repetition: true,
             auto_attach: true,
             auto_attach_saved_only: true,
+            auto_select_best_hook: true,
 
             ws_broadcast_enabled: true,
             ws_broadcast_port: 9001,
             to_clipboard: false,
-            minimize_to_tray: false,
+            minimize_to_tray: true,
+            start_on_boot: false,
+            start_minimized: false,
 
             knife_ws_enabled: true,
             knife_ws_url: "ws://127.0.0.1:6677".to_string(),
@@ -439,6 +445,45 @@ impl AppConfig {
         }
 
         PathBuf::from("resources")
+    }
+
+    /// Registers or removes Kiroku in `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
+    pub fn sync_windows_autostart(&self) {
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            let run_key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+            if self.start_on_boot {
+                if let Ok(exe) = std::env::current_exe() {
+                    let exe_str = exe.to_string_lossy();
+                    let cmd_val = if self.start_minimized || self.minimize_to_tray {
+                        format!("\"{}\" --minimized", exe_str)
+                    } else {
+                        format!("\"{}\"", exe_str)
+                    };
+                    let _ = std::process::Command::new("reg")
+                        .args([
+                            "add",
+                            run_key,
+                            "/v",
+                            "Kiroku",
+                            "/t",
+                            "REG_SZ",
+                            "/d",
+                            &cmd_val,
+                            "/f",
+                        ])
+                        .creation_flags(CREATE_NO_WINDOW)
+                        .status();
+                }
+            } else {
+                let _ = std::process::Command::new("reg")
+                    .args(["delete", run_key, "/v", "Kiroku", "/f"])
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .status();
+            }
+        }
     }
 }
 

@@ -2,7 +2,10 @@ use crate::lunahost::ffi::{
     LunaHostLibrary, ThreadParam, cstr_ptr_to_string, wide_ptr_to_string,
 };
 use crate::lunahost::injector::inject_lunahook_dll;
-use crate::pipeline::{cleaner::clean_sentence, scorer::score_thread_text};
+use crate::pipeline::{
+    cleaner::clean_sentence,
+    scorer::{is_high_quality_dialogue_candidate, score_thread_text},
+};
 use crate::process::window_list::{
     get_icon_cached, list_windowed_processes_fast, query_process_info, write_luna_game_bridge_json,
 };
@@ -189,6 +192,7 @@ pub struct HostManager {
     sentence_counter: std::sync::atomic::AtomicU64,
     session_chars: std::sync::atomic::AtomicU64,
     session_sentences: std::sync::atomic::AtomicU64,
+    manual_or_saved_locked: std::sync::atomic::AtomicBool,
 }
 
 impl HostManager {
@@ -203,6 +207,9 @@ impl HostManager {
                 None
             },
         );
+        if config.start_on_boot {
+            config.sync_windows_autostart();
+        }
 
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         *HOST_EVENT_TX.write() = Some(event_tx.clone());
@@ -267,11 +274,12 @@ impl HostManager {
             user_detached_pids: RwLock::new(HashSet::new()),
             threads: RwLock::new(HashMap::new()),
             selected_thread_key: RwLock::new(None),
-            console_logs: RwLock::new(vec!["LunaHook Rust Bridge initialized.".to_string()]),
+            console_logs: RwLock::new(vec!["Kiroku initialized.".to_string()]),
             knife_pid_cache: Mutex::new(None),
             sentence_counter: std::sync::atomic::AtomicU64::new(1),
             session_chars: std::sync::atomic::AtomicU64::new(0),
             session_sentences: std::sync::atomic::AtomicU64::new(0),
+            manual_or_saved_locked: std::sync::atomic::AtomicBool::new(false),
         });
 
         manager.spawn_event_loop(event_rx);
@@ -490,6 +498,8 @@ impl HostManager {
             pid,
             if is_64bit { "x64" } else { "x86" }
         ));
+        self.manual_or_saved_locked
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         self.sync_game_bridge_file();
         self.emit_state();
         Ok(())
@@ -526,6 +536,8 @@ impl HostManager {
 
         if !sel_still_exists {
             *self.selected_thread_key.write() = None;
+            self.manual_or_saved_locked
+                .store(false, std::sync::atomic::Ordering::Relaxed);
         }
 
         // Restore global Luna_Settings if no processes remain
@@ -608,6 +620,8 @@ impl HostManager {
                     }
                 }
                 if remember_for_exe && !is_knife {
+                    self.manual_or_saved_locked
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
                     if let Some(proc_info) = self.attached.read().get(&tp.process_id) {
                         let exe_path = proc_info.exe_path.clone();
                         let mut cfg = self.config.write();
@@ -719,6 +733,7 @@ impl HostManager {
             .set_forbidden_port(new_cfg.ws_broadcast_port);
         self.knife_client
             .update_config(new_cfg.knife_ws_enabled, &new_cfg.knife_ws_url);
+        new_cfg.sync_windows_autostart();
         new_cfg.save(&self.config_path)?;
         *self.config.write() = new_cfg;
         self.emit_state();
@@ -959,8 +974,34 @@ impl HostManager {
                         entry.history.drain(0..excess);
                     }
 
-                    if is_saved && self.selected_thread_key.read().as_ref() != Some(&key) {
-                        should_auto_select = true;
+                    if is_saved {
+                        self.manual_or_saved_locked
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                        if self.selected_thread_key.read().as_ref() != Some(&key) {
+                            should_auto_select = true;
+                        }
+                    } else if cfg.auto_select_best_hook
+                        && !self
+                            .manual_or_saved_locked
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                    {
+                        let entry_score = entry.score;
+                        if is_high_quality_dialogue_candidate(&cleaned, entry_score) {
+                            let cur_sel = self.selected_thread_key.read().clone();
+                            match cur_sel {
+                                None => {
+                                    should_auto_select = true;
+                                }
+                                Some(ref cur_key) if cur_key != &key => {
+                                    let cur_score =
+                                        threads.get(cur_key).map(|t| t.score).unwrap_or(0);
+                                    if entry_score >= cur_score.saturating_add(6) {
+                                        should_auto_select = true;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                 }
 

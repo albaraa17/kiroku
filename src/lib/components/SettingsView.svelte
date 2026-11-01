@@ -260,8 +260,27 @@
 
           <div class="switch-card">
             <div>
-              <strong>Minimize to System Tray on Close</strong>
-              <p>Keep the Rust hook + WebSocket bridge running in tray when closing the window</p>
+              <strong>Auto-Select Best Quality Hook (New Games)</strong>
+              <p>Automatically picks high-confidence Japanese dialogue threads when a game has no saved hook yet</p>
+            </div>
+            <label class="switch">
+              <input
+                type="checkbox"
+                checked={appStore.config.auto_select_best_hook}
+                onchange={() =>
+                  updateConfigField(
+                    'auto_select_best_hook',
+                    !appStore.config!.auto_select_best_hook,
+                  )}
+              />
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="switch-card">
+            <div>
+              <strong>Close to System Tray (Zero-RAM Mode)</strong>
+              <p>Unloads WebView2 completely on close so Kiroku runs in tray at ~4 MB RAM & 0% CPU</p>
             </div>
             <label class="switch">
               <input
@@ -271,6 +290,44 @@
                   updateConfigField(
                     'minimize_to_tray',
                     !appStore.config!.minimize_to_tray,
+                  )}
+              />
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="switch-card">
+            <div>
+              <strong>Start Kiroku on Windows Boot</strong>
+              <p>Automatically launch Kiroku in the background when you sign in to Windows</p>
+            </div>
+            <label class="switch">
+              <input
+                type="checkbox"
+                checked={appStore.config.start_on_boot}
+                onchange={() =>
+                  updateConfigField(
+                    'start_on_boot',
+                    !appStore.config!.start_on_boot,
+                  )}
+              />
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="switch-card">
+            <div>
+              <strong>Start Minimized in Zero-RAM Tray Mode</strong>
+              <p>Launch straight to the system tray without opening the UI window until clicked</p>
+            </div>
+            <label class="switch">
+              <input
+                type="checkbox"
+                checked={appStore.config.start_minimized}
+                onchange={() =>
+                  updateConfigField(
+                    'start_minimized',
+                    !appStore.config!.start_minimized,
                   )}
               />
               <span class="slider"></span>
