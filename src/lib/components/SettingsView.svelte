@@ -260,6 +260,25 @@
 
           <div class="switch-card">
             <div>
+              <strong>Auto-Sync Tadoku Library (`store.json`)</strong>
+              <p>Automatically detect and attach to any game registered in Tadoku (`%APPDATA%\tadoku\store.json`), even on first launch</p>
+            </div>
+            <label class="switch">
+              <input
+                type="checkbox"
+                checked={appStore.config.sync_tadoku_games}
+                onchange={() =>
+                  updateConfigField(
+                    'sync_tadoku_games',
+                    !appStore.config!.sync_tadoku_games,
+                  )}
+              />
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="switch-card">
+            <div>
               <strong>Auto-Select Best Quality Hook (New Games)</strong>
               <p>Automatically picks high-confidence Japanese dialogue threads when a game has no saved hook yet</p>
             </div>
@@ -271,6 +290,25 @@
                   updateConfigField(
                     'auto_select_best_hook',
                     !appStore.config!.auto_select_best_hook,
+                  )}
+              />
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="switch-card">
+            <div>
+              <strong>Background Input Bypass (0ms ControlClick)</strong>
+              <p>Allows attached VNs to accept instant background AHK ControlClick while blocking accidental clicks from Chrome</p>
+            </div>
+            <label class="switch">
+              <input
+                type="checkbox"
+                checked={appStore.config.background_input_bypass}
+                onchange={() =>
+                  updateConfigField(
+                    'background_input_bypass',
+                    !appStore.config!.background_input_bypass,
                   )}
               />
               <span class="slider"></span>
@@ -372,6 +410,31 @@
                 <span class="slider"></span>
               </label>
             </div>
+          </div>
+
+          <div class="field-box">
+            <label for="ws-format-select">
+              WebSocket Output Format (`ws://127.0.0.1:{appStore.config.ws_broadcast_port}`)
+              <span class="hint">
+                Root format. Or use <code>/raw</code> (plain text) and <code>/exstatic</code> (JSON) simultaneously!
+              </span>
+            </label>
+            <select
+              id="ws-format-select"
+              value={appStore.config.ws_plain_text ? 'plain' : 'exstatic'}
+              onchange={(e) =>
+                updateConfigField(
+                  'ws_plain_text',
+                  (e.currentTarget as HTMLSelectElement).value === 'plain',
+                )}
+            >
+              <option value="exstatic">
+                exSTATic / Tadoku JSON (&#123; process_id, process_path, sentence &#125;)
+              </option>
+              <option value="plain">
+                Plain Text Only (Texthooker UI / Kizuna / LapClipboard)
+              </option>
+            </select>
           </div>
 
           <div class="field-box">

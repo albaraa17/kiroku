@@ -1,11 +1,69 @@
 use anyhow::Result;
+use once_cell::sync::Lazy;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::SystemTime;
 
 static RULE_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+static TADOKU_CACHE: Lazy<Mutex<(Option<SystemTime>, Vec<String>)>> =
+    Lazy::new(|| Mutex::new((None, Vec::new())));
+
+#[derive(Deserialize)]
+struct TadokuStoreFile {
+    #[serde(rename = "gamesData", default)]
+    games_data: HashMap<String, TadokuGameEntry>,
+}
+
+#[derive(Deserialize)]
+struct TadokuGameEntry {
+    #[serde(default)]
+    exe_file_path: String,
+    #[serde(default)]
+    process_file_path: String,
+}
+
+/// Reads `%APPDATA%\tadoku\store.json` (read-only) and caches all game executable paths
+/// keyed by the file's `modified()` timestamp so background polling has zero I/O overhead.
+pub fn get_tadoku_library_exes() -> Vec<String> {
+    let Some(appdata) = std::env::var_os("APPDATA") else {
+        return Vec::new();
+    };
+    let store_path = PathBuf::from(appdata).join("tadoku").join("store.json");
+    let Ok(meta) = fs::metadata(&store_path) else {
+        return Vec::new();
+    };
+    let mtime = meta.modified().ok();
+
+    let mut cache = TADOKU_CACHE.lock();
+    if mtime.is_some() && cache.0 == mtime {
+        return cache.1.clone();
+    }
+
+    let Ok(content) = fs::read_to_string(&store_path) else {
+        return cache.1.clone();
+    };
+    let Ok(parsed) = serde_json::from_str::<TadokuStoreFile>(&content) else {
+        return cache.1.clone();
+    };
+
+    let mut exes = Vec::new();
+    let mut seen_lower = HashSet::new();
+    for entry in parsed.games_data.into_values() {
+        for raw_path in [entry.exe_file_path, entry.process_file_path] {
+            let trimmed = raw_path.trim();
+            if !trimmed.is_empty() && seen_lower.insert(trimmed.to_lowercase()) {
+                exes.push(trimmed.to_string());
+            }
+        }
+    }
+
+    *cache = (mtime, exes.clone());
+    exes
+}
 
 pub fn next_rule_id(prefix: &str) -> String {
     let ts = std::time::SystemTime::now()
@@ -127,11 +185,14 @@ pub struct AppConfig {
     pub filter_repetition: bool,
     pub auto_attach: bool,
     pub auto_attach_saved_only: bool,
+    pub sync_tadoku_games: bool,
     pub auto_select_best_hook: bool,
+    pub background_input_bypass: bool,
 
     // 2. Output & Bridge Settings
     pub ws_broadcast_enabled: bool,
     pub ws_broadcast_port: u16,
+    pub ws_plain_text: bool,
     pub to_clipboard: bool,
     pub minimize_to_tray: bool,
     pub start_on_boot: bool,
@@ -174,10 +235,13 @@ impl Default for AppConfig {
             filter_repetition: true,
             auto_attach: true,
             auto_attach_saved_only: true,
+            sync_tadoku_games: true,
             auto_select_best_hook: true,
+            background_input_bypass: true,
 
             ws_broadcast_enabled: true,
             ws_broadcast_port: 9001,
+            ws_plain_text: false,
             to_clipboard: false,
             minimize_to_tray: true,
             start_on_boot: false,
@@ -232,6 +296,29 @@ struct LegacyLunaHostConfig {
 }
 
 impl AppConfig {
+    /// Returns `auto_attach_exes` merged with Tadoku's `%APPDATA%\tadoku\store.json` library
+    /// when `sync_tadoku_games` is enabled.
+    pub fn combined_auto_attach_exes(&self) -> Vec<String> {
+        let mut combined = self.auto_attach_exes.clone();
+        if self.sync_tadoku_games {
+            for tadoku_exe in get_tadoku_library_exes() {
+                if !combined.iter().any(|e| same_game_path(e, &tadoku_exe)) {
+                    combined.push(tadoku_exe);
+                }
+            }
+        }
+        combined
+    }
+
+    pub fn is_tadoku_library_exe(&self, exe_path: &str) -> bool {
+        if !self.sync_tadoku_games {
+            return false;
+        }
+        get_tadoku_library_exes()
+            .iter()
+            .any(|t_exe| same_game_path(exe_path, t_exe))
+    }
+
     pub fn sanitize(&mut self) {
         self.flush_delay = self.flush_delay.clamp(0, 10_000);
         self.max_buffer_size = self.max_buffer_size.clamp(64, 500_000);
@@ -523,5 +610,22 @@ mod tests {
             .import_legacy_regex_filters(&defaults_dir.join("SavedRegexFilters.txt"))
             .expect("Failed to import SavedRegexFilters.txt");
         assert!(added_filters >= 1, "Expected imported regex filters");
+    }
+
+    #[test]
+    fn test_tadoku_store_library_sync() {
+        let tadoku_exes = get_tadoku_library_exes();
+        if !tadoku_exes.is_empty() {
+            let cfg = AppConfig::default();
+            let combined = cfg.combined_auto_attach_exes();
+            assert!(
+                combined.len() >= tadoku_exes.len(),
+                "Combined exes must include Tadoku library games"
+            );
+            assert!(
+                cfg.is_tadoku_library_exe(&tadoku_exes[0]),
+                "First Tadoku game should be recognized as a Tadoku library exe"
+            );
+        }
     }
 }

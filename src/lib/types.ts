@@ -60,10 +60,13 @@ export interface AppConfig {
   filter_repetition: boolean;
   auto_attach: boolean;
   auto_attach_saved_only: boolean;
+  sync_tadoku_games: boolean;
   auto_select_best_hook: boolean;
+  background_input_bypass: boolean;
 
   ws_broadcast_enabled: boolean;
   ws_broadcast_port: number;
+  ws_plain_text: boolean;
   to_clipboard: boolean;
   minimize_to_tray: boolean;
   start_on_boot: boolean;

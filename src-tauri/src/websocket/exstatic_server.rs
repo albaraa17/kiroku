@@ -2,11 +2,12 @@ use futures_util::{SinkExt, StreamExt};
 use log::{error, info, warn};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, Notify};
-use tokio_tungstenite::accept_async;
+use tokio_tungstenite::accept_hdr_async;
+use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 use tokio_tungstenite::tungstenite::Message;
 
 /// Exact JSON payload expected by exSTATic / TextractorSender clients
@@ -17,22 +18,31 @@ pub struct ExStaticSentencePayload {
     pub sentence: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClientFormatMode {
+    FollowDefault,
+    ExStaticJson,
+    PlainText,
+}
+
 pub struct ExStaticBroadcastServer {
-    tx: broadcast::Sender<String>,
+    tx: broadcast::Sender<ExStaticSentencePayload>,
     desired_port: AtomicU16,
     bound_port: AtomicU16,
+    default_plain_text: AtomicBool,
     client_count: Arc<AtomicUsize>,
-    last_payload: Arc<RwLock<Option<String>>>,
+    last_payload: Arc<RwLock<Option<ExStaticSentencePayload>>>,
     rebind_notify: Arc<Notify>,
 }
 
 impl ExStaticBroadcastServer {
-    pub fn new(initial_port: u16) -> Arc<Self> {
+    pub fn new(initial_port: u16, initial_plain_text: bool) -> Arc<Self> {
         let (tx, _) = broadcast::channel(256);
         let server = Arc::new(Self {
             tx,
             desired_port: AtomicU16::new(initial_port),
             bound_port: AtomicU16::new(initial_port),
+            default_plain_text: AtomicBool::new(initial_plain_text),
             client_count: Arc::new(AtomicUsize::new(0)),
             last_payload: Arc::new(RwLock::new(None)),
             rebind_notify: Arc::new(Notify::new()),
@@ -49,6 +59,10 @@ impl ExStaticBroadcastServer {
         self.client_count.load(Ordering::Relaxed)
     }
 
+    pub fn set_plain_text(&self, plain_text: bool) {
+        self.default_plain_text.store(plain_text, Ordering::Relaxed);
+    }
+
     pub fn set_port(&self, new_port: u16) {
         if new_port < 1024 {
             return;
@@ -60,11 +74,20 @@ impl ExStaticBroadcastServer {
     }
 
     pub fn broadcast_sentence(&self, payload: &ExStaticSentencePayload) -> usize {
-        if let Ok(json) = serde_json::to_string(payload) {
-            *self.last_payload.write() = Some(json.clone());
-            self.tx.send(json).unwrap_or(0)
+        *self.last_payload.write() = Some(payload.clone());
+        self.tx.send(payload.clone()).unwrap_or(0)
+    }
+
+    fn format_for_client(&self, payload: &ExStaticSentencePayload, mode: ClientFormatMode) -> Option<String> {
+        let use_plain = match mode {
+            ClientFormatMode::PlainText => true,
+            ClientFormatMode::ExStaticJson => false,
+            ClientFormatMode::FollowDefault => self.default_plain_text.load(Ordering::Relaxed),
+        };
+        if use_plain {
+            Some(payload.sentence.clone())
         } else {
-            0
+            serde_json::to_string(payload).ok()
         }
     }
 
@@ -119,7 +142,18 @@ impl ExStaticBroadcastServer {
     }
 
     async fn handle_client(&self, stream: TcpStream) {
-        let ws_stream = match accept_async(stream).await {
+        let mut mode = ClientFormatMode::FollowDefault;
+        let ws_stream = match accept_hdr_async(stream, |req: &Request, response: Response| {
+            let path = req.uri().path().to_ascii_lowercase();
+            if path.contains("raw") || path.contains("text") {
+                mode = ClientFormatMode::PlainText;
+            } else if path.contains("exstatic") || path.contains("json") {
+                mode = ClientFormatMode::ExStaticJson;
+            }
+            Ok(response)
+        })
+        .await
+        {
             Ok(ws) => ws,
             Err(e) => {
                 warn!("WebSocket handshake failed: {}", e);
@@ -131,20 +165,24 @@ impl ExStaticBroadcastServer {
         let (mut write, mut read) = ws_stream.split();
         let mut rx = self.tx.subscribe();
 
-        // Send most recent sentence to newly connected exSTATic client if available
-        let initial_msg = self.last_payload.read().clone();
-        if let Some(msg) = initial_msg {
-            if write.send(Message::Text(msg)).await.is_err() {
-                self.client_count.fetch_sub(1, Ordering::Relaxed);
-                return;
+        // Send most recent sentence to newly connected client if available
+        let initial_payload = self.last_payload.read().clone();
+        if let Some(payload) = initial_payload {
+            if let Some(msg) = self.format_for_client(&payload, mode) {
+                if write.send(Message::Text(msg)).await.is_err() {
+                    self.client_count.fetch_sub(1, Ordering::Relaxed);
+                    return;
+                }
             }
         }
 
         loop {
             tokio::select! {
-                Ok(json_msg) = rx.recv() => {
-                    if write.send(Message::Text(json_msg)).await.is_err() {
-                        break;
+                Ok(payload) = rx.recv() => {
+                    if let Some(msg) = self.format_for_client(&payload, mode) {
+                        if write.send(Message::Text(msg)).await.is_err() {
+                            break;
+                        }
                     }
                 }
                 incoming = read.next() => {

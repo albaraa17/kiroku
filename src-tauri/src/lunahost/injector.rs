@@ -24,15 +24,35 @@ fn escape_ps_single_quoted(s: &str) -> String {
 /// Injects `LunaHook32.dll` or `LunaHook64.dll` into the target process using
 /// `LunaSubProcess32.exe` / `LunaSubProcess64.exe` (which also handles WolfRPG WinVerifyTrust bypass).
 pub fn inject_lunahook_dll(lunahook_dir: &Path, pid: u32, is_64bit: bool) -> Result<()> {
-    let helper_name = if is_64bit {
-        "LunaSubProcess64.exe"
-    } else {
-        "LunaSubProcess32.exe"
-    };
     let dll_name = if is_64bit {
         "LunaHook64.dll"
     } else {
         "LunaHook32.dll"
+    };
+    inject_custom_dll(lunahook_dir, pid, is_64bit, dll_name)
+}
+
+/// Injects `kiroku_bginput32.dll` or `kiroku_bginput64.dll` into the target process so stubborn
+/// VN engines accept 0ms background `ControlClick` without reacting to physical clicks in Chrome.
+pub fn inject_bginput_dll(lunahook_dir: &Path, pid: u32, is_64bit: bool) -> Result<()> {
+    let dll_name = if is_64bit {
+        "kiroku_bginput64.dll"
+    } else {
+        "kiroku_bginput32.dll"
+    };
+    inject_custom_dll(lunahook_dir, pid, is_64bit, dll_name)
+}
+
+fn inject_custom_dll(
+    lunahook_dir: &Path,
+    pid: u32,
+    is_64bit: bool,
+    dll_name: &str,
+) -> Result<()> {
+    let helper_name = if is_64bit {
+        "LunaSubProcess64.exe"
+    } else {
+        "LunaSubProcess32.exe"
     };
 
     let helper_path = lunahook_dir.join(helper_name);

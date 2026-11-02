@@ -38,7 +38,7 @@ fn save_config(mgr: State<'_, Arc<HostManager>>, config: AppConfig) -> Result<Ap
 
 #[tauri::command]
 async fn list_processes(mgr: State<'_, Arc<HostManager>>) -> Result<Vec<ProcessEntry>, String> {
-    let saved = mgr.config.read().auto_attach_exes.clone();
+    let saved = mgr.config.read().combined_auto_attach_exes();
     tokio::task::spawn_blocking(move || list_windowed_processes(&saved))
         .await
         .map_err(|e| e.to_string())

@@ -1,7 +1,7 @@
 use crate::lunahost::ffi::{
     LunaHostLibrary, ThreadParam, cstr_ptr_to_string, wide_ptr_to_string,
 };
-use crate::lunahost::injector::inject_lunahook_dll;
+use crate::lunahost::injector::{inject_bginput_dll, inject_lunahook_dll};
 use crate::pipeline::{
     cleaner::clean_sentence,
     scorer::{is_high_quality_dialogue_candidate, score_thread_text},
@@ -214,7 +214,8 @@ impl HostManager {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         *HOST_EVENT_TX.write() = Some(event_tx.clone());
 
-        let ws_server = ExStaticBroadcastServer::new(config.ws_broadcast_port);
+        let ws_server =
+            ExStaticBroadcastServer::new(config.ws_broadcast_port, config.ws_plain_text);
 
         let (knife_tx, mut knife_rx) = mpsc::unbounded_channel::<String>();
         let knife_client = KnifeIngestClient::new(
@@ -442,12 +443,15 @@ impl HostManager {
 
         // Connect pipe and inject BEFORE adding to `attached` so failed injection leaves no ghost state
         lib.connect_process(pid);
+        let lunahook_dir = self.resources_dir.join("lunahook");
         if lib.check_if_need_inject(pid) {
-            let lunahook_dir = self.resources_dir.join("lunahook");
             if let Err(e) = inject_lunahook_dll(&lunahook_dir, pid, is_64bit) {
                 lib.detach_process(pid);
                 return Err(e);
             }
+        }
+        if self.config.read().background_input_bypass {
+            let _ = inject_bginput_dll(&lunahook_dir, pid, is_64bit);
         }
 
         self.attached.write().insert(
@@ -719,6 +723,13 @@ impl HostManager {
 
     pub fn update_config(&self, mut new_cfg: AppConfig) -> Result<()> {
         new_cfg.sanitize();
+        let was_bg_bypass = self.config.read().background_input_bypass;
+        if new_cfg.background_input_bypass && !was_bg_bypass {
+            let lunahook_dir = self.resources_dir.join("lunahook");
+            for p in self.attached.read().values().filter(|p| !p.is_knife) {
+                let _ = inject_bginput_dll(&lunahook_dir, p.pid, p.is_64bit);
+            }
+        }
         if let Some(lib) = &self.lib {
             lib.apply_settings(
                 new_cfg.flush_delay,
@@ -729,6 +740,7 @@ impl HostManager {
             );
         }
         self.ws_server.set_port(new_cfg.ws_broadcast_port);
+        self.ws_server.set_plain_text(new_cfg.ws_plain_text);
         self.knife_client
             .set_forbidden_port(new_cfg.ws_broadcast_port);
         self.knife_client
@@ -1147,7 +1159,8 @@ impl HostManager {
                 if !cfg.auto_attach || !mgr.attached.read().is_empty() {
                     continue;
                 }
-                let procs = list_windowed_processes_fast(&cfg.auto_attach_exes);
+                let combined_exes = cfg.combined_auto_attach_exes();
+                let procs = list_windowed_processes_fast(&combined_exes);
                 let live_pids: HashSet<u32> = procs.iter().map(|p| p.pid).collect();
                 mgr.user_detached_pids
                     .write()
@@ -1164,7 +1177,9 @@ impl HostManager {
                     if !proc_entry.is_saved {
                         continue;
                     }
+                    let is_tadoku_game = cfg.is_tadoku_library_exe(&proc_entry.exe_path);
                     if cfg.auto_attach_saved_only
+                        && !is_tadoku_game
                         && Self::find_saved_hook_in_map(&cfg.saved_hooks, &proc_entry.exe_path)
                             .is_none()
                     {
