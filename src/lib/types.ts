@@ -83,6 +83,7 @@ export interface AppConfig {
   filter_chinese_segments: boolean;
   normalize_whitespace: boolean;
   hide_garbage_threads: boolean;
+  backlog_filter_enabled: boolean;
 
   regex_filters: RegexFilterRule[];
   regex_replacements: RegexReplaceRule[];
@@ -120,6 +121,7 @@ export interface SentenceEntry {
   raw: string;
   cleaned: string;
   char_count: number;
+  is_backlog?: boolean;
 }
 
 export interface HookThreadView {

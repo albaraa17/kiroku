@@ -1,3 +1,4 @@
+use crate::backlog::{BacklogDetector, Candidate, Config as BacklogConfig, ThreadKey};
 use crate::lunahost::ffi::{
     LunaHostLibrary, ThreadParam, cstr_ptr_to_string, wide_ptr_to_string,
 };
@@ -19,7 +20,7 @@ use log::{info, warn};
 use once_cell::sync::Lazy;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -28,6 +29,13 @@ use tokio::sync::mpsc;
 
 static HOST_EVENT_TX: Lazy<RwLock<Option<mpsc::UnboundedSender<HostEvent>>>> =
     Lazy::new(|| RwLock::new(None));
+
+pub fn thread_key_to_u64(key: &str) -> ThreadKey {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    ThreadKey(hasher.finish())
+}
 
 fn send_host_event(ev: HostEvent) {
     if let Some(tx) = HOST_EVENT_TX.read().as_ref() {
@@ -142,6 +150,8 @@ pub struct SentenceEntry {
     pub raw: String,
     pub cleaned: String,
     pub char_count: usize,
+    #[serde(default)]
+    pub is_backlog: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -193,6 +203,8 @@ pub struct HostManager {
     session_chars: std::sync::atomic::AtomicU64,
     session_sentences: std::sync::atomic::AtomicU64,
     manual_or_saved_locked: std::sync::atomic::AtomicBool,
+    pub detector: Mutex<BacklogDetector>,
+    pending_raw: Mutex<VecDeque<(String, String)>>,
 }
 
 impl HostManager {
@@ -281,6 +293,8 @@ impl HostManager {
             session_chars: std::sync::atomic::AtomicU64::new(0),
             session_sentences: std::sync::atomic::AtomicU64::new(0),
             manual_or_saved_locked: std::sync::atomic::AtomicBool::new(false),
+            detector: Mutex::new(BacklogDetector::new(BacklogConfig::default())),
+            pending_raw: Mutex::new(VecDeque::new()),
         });
 
         manager.spawn_event_loop(event_rx);
@@ -569,6 +583,7 @@ impl HostManager {
         }
         self.threads.write().clear();
         *self.selected_thread_key.write() = None;
+        self.detector.lock().set_primary_thread(None);
         self.sync_game_bridge_file();
         self.emit_state();
     }
@@ -610,6 +625,12 @@ impl HostManager {
         }
 
         *sel_guard = key.clone();
+        if let Some(ref k) = key {
+            let t_key = thread_key_to_u64(k);
+            self.detector.lock().set_primary_thread(Some(t_key));
+        } else {
+            self.detector.lock().set_primary_thread(None);
+        }
         drop(sel_guard);
 
         if let Some(k) = key {
@@ -800,8 +821,18 @@ impl HostManager {
     fn spawn_event_loop(self: &Arc<Self>, mut rx: mpsc::UnboundedReceiver<HostEvent>) {
         let mgr = Arc::clone(self);
         tauri::async_runtime::spawn(async move {
-            while let Some(ev) = rx.recv().await {
-                mgr.handle_host_event(ev);
+            let mut tick_interval = tokio::time::interval(Duration::from_millis(50));
+            loop {
+                tokio::select! {
+                    biased;
+                    Some(ev) = rx.recv() => {
+                        mgr.handle_host_event(ev);
+                    }
+                    _ = tick_interval.tick() => {
+                        mgr.handle_backlog_tick();
+                    }
+                    else => break,
+                }
             }
         });
     }
@@ -862,6 +893,7 @@ impl HostManager {
                 drop(threads);
                 if !sel_exists {
                     *self.selected_thread_key.write() = None;
+                    self.detector.lock().set_primary_thread(None);
                 }
                 self.push_log(format!("Process {} disconnected.", pid));
                 self.sync_game_bridge_file();
@@ -907,6 +939,7 @@ impl HostManager {
                 self.threads.write().remove(&key);
                 if self.selected_thread_key.read().as_ref() == Some(&key) {
                     *self.selected_thread_key.write() = None;
+                    self.detector.lock().set_primary_thread(None);
                 }
                 self.emit_state();
             }
@@ -964,28 +997,6 @@ impl HostManager {
                     } else {
                         ((entry.score as u16 * 2 + score as u16) / 3) as u8
                     };
-                    entry.latest_raw = text.clone();
-                    entry.latest_cleaned = cleaned.clone();
-                    entry.total_sentences += 1;
-                    let char_len = cleaned.chars().filter(|c| !c.is_whitespace()).count();
-                    entry.total_chars += char_len as u64;
-
-                    let id = self
-                        .sentence_counter
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
-                    entry.history.push(SentenceEntry {
-                        id,
-                        timestamp,
-                        raw: text,
-                        cleaned: cleaned.clone(),
-                        char_count: char_len,
-                    });
-                    if entry.history.len() > 80 {
-                        let excess = entry.history.len() - 80;
-                        entry.history.drain(0..excess);
-                    }
-
                     if is_saved {
                         self.manual_or_saved_locked
                             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1023,15 +1034,42 @@ impl HostManager {
 
                 let is_selected = self.selected_thread_key.read().as_ref() == Some(&key);
                 if is_selected {
-                    self.dispatch_selected_sentence(
+                    self.process_selected_sentence(
                         tp.process_id,
                         proc_path.unwrap_or_default(),
-                        &cleaned,
+                        &key,
+                        text,
+                        cleaned,
                         &cfg,
                     );
+                } else {
+                    let char_len = cleaned.chars().filter(|c| !c.is_whitespace()).count();
+                    let mut threads = self.threads.write();
+                    if let Some(entry) = threads.get_mut(&key) {
+                        entry.latest_raw = text.clone();
+                        entry.latest_cleaned = cleaned.clone();
+                        entry.total_sentences += 1;
+                        entry.total_chars += char_len as u64;
+                        let id = self
+                            .sentence_counter
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
+                        entry.history.push(SentenceEntry {
+                            id,
+                            timestamp,
+                            raw: text,
+                            cleaned,
+                            char_count: char_len,
+                            is_backlog: false,
+                        });
+                        if entry.history.len() > 80 {
+                            let excess = entry.history.len() - 80;
+                            entry.history.drain(0..excess);
+                        }
+                    }
+                    drop(threads);
+                    self.emit_state();
                 }
-
-                self.emit_state();
             }
             HostEvent::HostInfo { info_type: _, log } => {
                 if !log.trim().is_empty() {
@@ -1052,8 +1090,10 @@ impl HostManager {
                 }
 
                 let key = "knife:ws".to_string();
-                let char_len = cleaned.chars().filter(|c| !c.is_whitespace()).count();
-                {
+                if self.selected_thread_key.read().as_ref() == Some(&key) {
+                    self.process_selected_sentence(pid, proc_path, &key, raw_text, cleaned, &cfg);
+                } else {
+                    let char_len = cleaned.chars().filter(|c| !c.is_whitespace()).count();
                     let mut threads = self.threads.write();
                     if let Some(entry) = threads.get_mut(&key) {
                         entry.tp.process_id = pid;
@@ -1069,21 +1109,313 @@ impl HostManager {
                             id,
                             timestamp,
                             raw: raw_text,
-                            cleaned: cleaned.clone(),
+                            cleaned,
                             char_count: char_len,
+                            is_backlog: false,
                         });
                         if entry.history.len() > 80 {
                             let excess = entry.history.len() - 80;
                             entry.history.drain(0..excess);
                         }
                     }
+                    drop(threads);
+                    self.emit_state();
+                }
+            }
+        }
+    }
+
+    fn store_pending_raw(&self, cleaned: String, raw: String) {
+        let mut map = self.pending_raw.lock();
+        if map.len() > 64 {
+            map.pop_front();
+        }
+        map.push_back((cleaned, raw));
+    }
+
+    fn take_pending_raw(&self, cleaned: &str) -> Option<String> {
+        let mut map = self.pending_raw.lock();
+        if let Some(pos) = map.iter().rposition(|(c, _)| c == cleaned) {
+            return Some(map.remove(pos).unwrap().1);
+        }
+        None
+    }
+
+    pub fn release_last_suppressed(&self) -> Option<String> {
+        let cand = self.detector.lock().take_last_suppressed()?;
+        let sel_key = self.selected_thread_key.read().clone()?;
+        let cfg = self.config.read().clone();
+        let (pid, proc_path) = {
+            let threads = self.threads.read();
+            let entry = threads.get(&sel_key)?;
+            let pid = entry.tp.process_id;
+            let proc_path = self
+                .attached
+                .read()
+                .get(&pid)
+                .map(|p| p.exe_path.clone())
+                .unwrap_or_default();
+            (pid, proc_path)
+        };
+        self.dispatch_selected_sentence(pid, proc_path, &cand.text, &cfg);
+        self.emit_state();
+        Some(cand.text)
+    }
+
+    pub fn notify_user_input(&self) {
+        self.detector.lock().on_input(Instant::now());
+    }
+
+    fn handle_backlog_tick(&self) {
+        let cfg = self.config.read().clone();
+        if !cfg.backlog_filter_enabled {
+            return;
+        }
+        let outcome = {
+            let mut det = self.detector.lock();
+            det.on_tick(Instant::now())
+        };
+        if outcome.emit.is_empty() && outcome.suppressed.is_empty() {
+            return;
+        }
+
+        let sel_key = self.selected_thread_key.read().clone();
+        let Some(ref key) = sel_key else {
+            return;
+        };
+
+        let mut changed = false;
+        let mut to_dispatch: Vec<(u32, String, String)> = Vec::new();
+
+        {
+            let mut threads = self.threads.write();
+            let Some(entry) = threads.get_mut(key) else {
+                return;
+            };
+            let proc_path = self
+                .attached
+                .read()
+                .get(&entry.tp.process_id)
+                .map(|p| p.exe_path.clone())
+                .unwrap_or_default();
+            let pid = entry.tp.process_id;
+
+            for em in outcome.emit {
+                let raw = self
+                    .take_pending_raw(&em.text)
+                    .unwrap_or_else(|| em.text.clone());
+                let char_len = em.text.chars().filter(|c| !c.is_whitespace()).count();
+                let id = self
+                    .sentence_counter
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
+
+                entry.latest_raw = raw.clone();
+                entry.latest_cleaned = em.text.clone();
+                entry.total_sentences += 1;
+                entry.total_chars += char_len as u64;
+                entry.history.push(SentenceEntry {
+                    id,
+                    timestamp,
+                    raw,
+                    cleaned: em.text.clone(),
+                    char_count: char_len,
+                    is_backlog: false,
+                });
+                if entry.history.len() > 80 {
+                    let excess = entry.history.len() - 80;
+                    entry.history.drain(0..excess);
+                }
+                to_dispatch.push((pid, proc_path.clone(), em.text));
+                changed = true;
+            }
+
+            for (suppressed_cand, reason) in outcome.suppressed {
+                let raw = self
+                    .take_pending_raw(&suppressed_cand.text)
+                    .unwrap_or_else(|| suppressed_cand.text.clone());
+                let char_len = suppressed_cand
+                    .text
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .count();
+                let id = self
+                    .sentence_counter
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
+
+                entry.latest_raw = raw.clone();
+                entry.latest_cleaned = suppressed_cand.text.clone();
+                entry.history.push(SentenceEntry {
+                    id,
+                    timestamp,
+                    raw,
+                    cleaned: suppressed_cand.text.clone(),
+                    char_count: char_len,
+                    is_backlog: true,
+                });
+                if entry.history.len() > 80 {
+                    let excess = entry.history.len() - 80;
+                    entry.history.drain(0..excess);
+                }
+                let _ = self.app_handle.emit(
+                    "backlog_suppressed",
+                    serde_json::json!({
+                        "text": suppressed_cand.text,
+                        "reason": format!("{:?}", reason),
+                    }),
+                );
+                changed = true;
+            }
+        }
+
+        for (pid, path, txt) in to_dispatch {
+            self.dispatch_selected_sentence(pid, path, &txt, &cfg);
+        }
+
+        if changed {
+            self.emit_state();
+        }
+    }
+
+    fn process_selected_sentence(
+        &self,
+        pid: u32,
+        proc_path: String,
+        key: &str,
+        raw_text: String,
+        cleaned: String,
+        cfg: &AppConfig,
+    ) {
+        if !cfg.backlog_filter_enabled {
+            let char_len = cleaned.chars().filter(|c| !c.is_whitespace()).count();
+            let id = self
+                .sentence_counter
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
+            {
+                let mut threads = self.threads.write();
+                if let Some(entry) = threads.get_mut(key) {
+                    entry.latest_raw = raw_text.clone();
+                    entry.latest_cleaned = cleaned.clone();
+                    entry.total_sentences += 1;
+                    entry.total_chars += char_len as u64;
+                    entry.history.push(SentenceEntry {
+                        id,
+                        timestamp,
+                        raw: raw_text,
+                        cleaned: cleaned.clone(),
+                        char_count: char_len,
+                        is_backlog: false,
+                    });
+                    if entry.history.len() > 80 {
+                        let excess = entry.history.len() - 80;
+                        entry.history.drain(0..excess);
+                    }
+                }
+            }
+            self.dispatch_selected_sentence(pid, proc_path, &cleaned, cfg);
+            self.emit_state();
+            return;
+        }
+
+        let thread_key = thread_key_to_u64(key);
+        self.store_pending_raw(cleaned.clone(), raw_text.clone());
+        let cand = Candidate::new(cleaned, thread_key, Instant::now());
+        let outcome = {
+            let mut det = self.detector.lock();
+            det.on_line(cand)
+        };
+
+        let mut to_dispatch: Vec<(u32, String, String)> = Vec::new();
+        let mut changed = false;
+
+        {
+            let mut threads = self.threads.write();
+            if let Some(entry) = threads.get_mut(key) {
+                // 1. Emit(lines) -> send each line in order to the WebSocket/clipboard and UI as normal.
+                for em in outcome.emit {
+                    let raw = self
+                        .take_pending_raw(&em.text)
+                        .unwrap_or_else(|| em.text.clone());
+                    let char_len = em.text.chars().filter(|c| !c.is_whitespace()).count();
+                    let id = self
+                        .sentence_counter
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
+
+                    entry.latest_raw = raw.clone();
+                    entry.latest_cleaned = em.text.clone();
+                    entry.total_sentences += 1;
+                    entry.total_chars += char_len as u64;
+                    entry.history.push(SentenceEntry {
+                        id,
+                        timestamp,
+                        raw,
+                        cleaned: em.text.clone(),
+                        char_count: char_len,
+                        is_backlog: false,
+                    });
+                    if entry.history.len() > 80 {
+                        let excess = entry.history.len() - 80;
+                        entry.history.drain(0..excess);
+                    }
+                    to_dispatch.push((pid, proc_path.clone(), em.text));
+                    changed = true;
                 }
 
-                if self.selected_thread_key.read().as_ref() == Some(&key) {
-                    self.dispatch_selected_sentence(pid, proc_path, &cleaned, &cfg);
+                // 2. Suppress(reason) -> block from WebSocket/clipboard, but still emit a Tauri event to the frontend UI so the line can be displayed dimmed with a [BACKLOG] badge.
+                for (suppressed_cand, reason) in outcome.suppressed {
+                    let raw = self
+                        .take_pending_raw(&suppressed_cand.text)
+                        .unwrap_or_else(|| suppressed_cand.text.clone());
+                    let char_len = suppressed_cand
+                        .text
+                        .chars()
+                        .filter(|c| !c.is_whitespace())
+                        .count();
+                    let id = self
+                        .sentence_counter
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
+
+                    entry.latest_raw = raw.clone();
+                    entry.latest_cleaned = suppressed_cand.text.clone();
+                    entry.history.push(SentenceEntry {
+                        id,
+                        timestamp,
+                        raw,
+                        cleaned: suppressed_cand.text.clone(),
+                        char_count: char_len,
+                        is_backlog: true,
+                    });
+                    if entry.history.len() > 80 {
+                        let excess = entry.history.len() - 80;
+                        entry.history.drain(0..excess);
+                    }
+                    let _ = self.app_handle.emit(
+                        "backlog_suppressed",
+                        serde_json::json!({
+                            "text": suppressed_cand.text,
+                            "reason": format!("{:?}", reason),
+                        }),
+                    );
+                    changed = true;
                 }
-                self.emit_state();
             }
+        }
+
+        for (pid, path, txt) in to_dispatch {
+            self.dispatch_selected_sentence(pid, path, &txt, cfg);
+        }
+
+        // 3. Hold -> do nothing yet; let the background on_tick timer (~50ms interval) flush it if the 150ms deadline expires.
+        if outcome.held {
+            log::debug!("Backlog candidate held in 150ms PENDING window");
+        }
+
+        if changed {
+            self.emit_state();
         }
     }
 

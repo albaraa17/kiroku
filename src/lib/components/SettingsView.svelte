@@ -371,6 +371,24 @@
               <span class="slider"></span>
             </label>
           </div>
+          <div class="switch-card">
+            <div>
+              <strong>Smart Backlog Flood Protection</strong>
+              <p>Suppresses multi-line buffer dumps and scroll wheel redraws when opening the backlog screen while guaranteeing live reading is never muted</p>
+            </div>
+            <label class="switch">
+              <input
+                type="checkbox"
+                checked={appStore.config.backlog_filter_enabled}
+                onchange={() =>
+                  updateConfigField(
+                    'backlog_filter_enabled',
+                    !appStore.config!.backlog_filter_enabled,
+                  )}
+              />
+              <span class="slider"></span>
+            </label>
+          </div>
         </div>
       </section>
 

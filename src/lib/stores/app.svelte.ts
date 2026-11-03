@@ -28,6 +28,7 @@ class AppStateStore {
   loadingProcesses = $state(false);
 
   private unlistenDashboard: UnlistenFn | null = null;
+  private unlistenBacklog: UnlistenFn | null = null;
 
   async init() {
     try {
@@ -35,6 +36,13 @@ class AppStateStore {
         'dashboard_updated',
         (event) => {
           this.snapshot = event.payload;
+        },
+      );
+
+      this.unlistenBacklog = await listen<{ text: string; reason: string }>(
+        'backlog_suppressed',
+        (event) => {
+          console.debug('[Backlog Flood Guard] Suppressed replay line:', event.payload);
         },
       );
 
@@ -54,6 +62,10 @@ class AppStateStore {
     if (this.unlistenDashboard) {
       this.unlistenDashboard();
       this.unlistenDashboard = null;
+    }
+    if (this.unlistenBacklog) {
+      this.unlistenBacklog();
+      this.unlistenBacklog = null;
     }
   }
 
@@ -167,6 +179,19 @@ class AppStateStore {
       toast.success(label);
     } catch (err) {
       toast.error(`Clipboard error: ${err}`);
+    }
+  }
+
+  async releaseLastSuppressed() {
+    try {
+      const text = await invoke<string | null>('release_last_suppressed');
+      if (text) {
+        toast.info(`Released suppressed line to exSTATic: ${text.slice(0, 30)}...`);
+      } else {
+        toast.info('No recently suppressed line in buffer.');
+      }
+    } catch (err) {
+      toast.error(`Release failed: ${err}`);
     }
   }
 

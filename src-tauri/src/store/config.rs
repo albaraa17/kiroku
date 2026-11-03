@@ -65,6 +65,10 @@ pub fn get_tadoku_library_exes() -> Vec<String> {
     exes
 }
 
+fn default_true() -> bool {
+    true
+}
+
 pub fn next_rule_id(prefix: &str) -> String {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -211,6 +215,8 @@ pub struct AppConfig {
     pub filter_chinese_segments: bool,
     pub normalize_whitespace: bool,
     pub hide_garbage_threads: bool,
+    #[serde(default = "default_true")]
+    pub backlog_filter_enabled: bool,
 
     pub regex_filters: Vec<RegexFilterRule>,
     pub regex_replacements: Vec<RegexReplaceRule>,
@@ -258,6 +264,7 @@ impl Default for AppConfig {
             filter_chinese_segments: true,
             normalize_whitespace: true,
             hide_garbage_threads: false,
+            backlog_filter_enabled: true,
 
             regex_filters: Vec::new(),
             regex_replacements: Vec::new(),

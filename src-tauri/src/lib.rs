@@ -133,6 +133,11 @@ fn broadcast_test_sentence(
 }
 
 #[tauri::command]
+fn release_last_suppressed(mgr: State<'_, Arc<HostManager>>) -> Option<String> {
+    mgr.release_last_suppressed()
+}
+
+#[tauri::command]
 fn copy_to_clipboard(text: String) -> Result<(), String> {
     let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
     cb.set_text(text).map_err(|e| e.to_string())
@@ -292,6 +297,7 @@ pub fn run() {
             broadcast_test_sentence,
             copy_to_clipboard,
             import_legacy_config_file,
+            release_last_suppressed,
             minimize_to_tray_zero_ram,
         ])
         .build(tauri::generate_context!())

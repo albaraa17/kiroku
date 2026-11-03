@@ -62,6 +62,14 @@
     });
   }
 
+  async function toggleBacklogGuard() {
+    if (!appStore.config) return;
+    await appStore.saveConfig({
+      ...appStore.config,
+      backlog_filter_enabled: !appStore.config.backlog_filter_enabled,
+    });
+  }
+
   async function submitHookCode(e: SubmitEvent) {
     e.preventDefault();
     if (!hookcodeInput.trim()) return;
@@ -180,6 +188,16 @@
         >
           <i class="fa-regular fa-clipboard"></i>
           Clipboard {appStore.config.to_clipboard ? 'ON' : 'OFF'}
+        </button>
+
+        <button
+          class="toggle-pill"
+          class:active={appStore.config.backlog_filter_enabled}
+          onclick={toggleBacklogGuard}
+          title="Smart Backlog Protection (suppresses scroll wheel and backlog screen floods)"
+        >
+          <i class="fa-solid fa-shield-halved"></i>
+          Backlog Guard {appStore.config.backlog_filter_enabled ? 'ON' : 'OFF'}
         </button>
 
         <button
@@ -381,10 +399,15 @@
           </div>
         {:else}
           {#each [...selectedThread.history].reverse() as item (item.id)}
-            <div class="sentence-card">
+            <div class="sentence-card" class:backlog-dimmed={item.is_backlog}>
               <div class="sentence-header">
                 <span class="sentence-time">{item.timestamp}</span>
                 <span class="sentence-chars">{item.char_count} chars</span>
+                {#if item.is_backlog}
+                  <span class="backlog-badge" title="Suppressed backlog flood line (blocked from exSTATic / clipboard)">
+                    <i class="fa-solid fa-clock-rotate-left"></i> [BACKLOG]
+                  </span>
+                {/if}
                 {#if item.raw.trim() !== item.cleaned.trim()}
                   <span class="cleaned-badge">
                     <i class="fa-solid fa-wand-magic-sparkles"></i> Cleaned
@@ -982,6 +1005,31 @@
     padding: 1px 6px;
     border-radius: 4px;
     font-weight: 600;
+  }
+
+  .backlog-badge {
+    background: rgba(247, 118, 142, 0.18);
+    color: #f7768e;
+    border: 1px solid rgba(247, 118, 142, 0.35);
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-weight: 700;
+    font-size: 0.72rem;
+    letter-spacing: 0.03em;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+  }
+
+  .sentence-card.backlog-dimmed {
+    opacity: 0.52;
+    background: rgba(255, 255, 255, 0.02);
+    border-style: dashed;
+    border-color: rgba(247, 118, 142, 0.3);
+  }
+
+  .sentence-card.backlog-dimmed:hover {
+    opacity: 0.88;
   }
 
   .sentence-actions {
