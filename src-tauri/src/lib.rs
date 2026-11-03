@@ -1,3 +1,4 @@
+pub mod backlog;
 pub mod lunahost;
 pub mod pipeline;
 pub mod process;
