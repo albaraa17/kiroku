@@ -198,6 +198,7 @@ fn normalize(raw: &str) -> Normalized {
     let mut buf = String::with_capacity(raw.len());
     let mut in_ruby = false;
     let mut last_sig: Option<char> = None;
+    let mut prev_is_close_quote = false;
     for ch in raw.chars() {
         let Some(ch) = map_char(ch) else { continue };
         if has_ruby {
@@ -215,10 +216,20 @@ fn normalize(raw: &str) -> Normalized {
                 continue;
             }
         }
-        // 「a」「b」 -> two hard segments.
-        if matches!(ch, '「' | '『') && matches!(last_sig, Some('」' | '』')) {
+        // Segment break after closing quote when followed by next non-whitespace character,
+        // or between adjacent quotes 「a」「b」 -> two hard segments.
+        if prev_is_close_quote && !ch.is_whitespace() && ch != '\n' {
+            buf.push('\n');
+            prev_is_close_quote = false;
+        } else if matches!(ch, '「' | '『') && matches!(last_sig, Some('」' | '』')) {
             buf.push('\n');
         }
+        if matches!(ch, '」' | '』') {
+            prev_is_close_quote = true;
+        } else if !ch.is_whitespace() {
+            prev_is_close_quote = false;
+        }
+
         if ch == '\n' {
             last_sig = None;
         } else if !ch.is_whitespace() {
@@ -237,6 +248,19 @@ fn normalize(raw: &str) -> Normalized {
                     n.names.push(name);
                 }
                 line = rest[end + '】'.len_utf8()..].trim_start();
+            }
+        } else if let Some(q_idx) = line.find(['「', '『']) {
+            // Unbracketed speaker name directly preceding quote (e.g. 柊一郎「...」 or 妙花「...」)
+            if q_idx > 0 {
+                let prefix = &line[..q_idx];
+                let prefix_chars: Vec<char> = prefix.chars().filter(|c| !c.is_whitespace()).collect();
+                if (1..=12).contains(&prefix_chars.len())
+                    && !prefix_chars.iter().any(|&c| matches!(c, '。' | '、' | '！' | '？' | '!' | '?' | '.' | ','))
+                {
+                    let name: String = prefix_chars.into_iter().collect();
+                    n.names.push(name);
+                    line = &line[q_idx..];
+                }
             }
         }
         let quoted = line.contains(['「', '『']);
@@ -309,7 +333,7 @@ struct Analysis {
 
 impl Analysis {
     fn is_dump(&self) -> bool {
-        self.chain.len() >= 2 && self.chain_hard
+        (self.chain.len() >= 2 && self.chain_hard) || self.chain.len() >= 3
     }
     fn is_repeat(&self, cfg: &Config) -> bool {
         !self.exact.is_empty()
@@ -1118,5 +1142,24 @@ mod tests {
         assert!(o.emit.is_empty());
         assert_eq!(reasons(&o), vec![Reason::BacklogDump]);
         assert!(s.det.names.contains("直哉") && s.det.names.contains("藍"));
+    }
+
+    #[test]
+    fn a4_real_world_vn_backlog_dump_without_newlines() {
+        let line1 = "「お嬢様なのに、趣味はおじさんなのか」";
+        let line2 = "「おじさんってぇのは心外だが……まぁそうだな、こいつは家族の影響だろうから、そう言われても仕方がない」";
+        let line3 = "組長は、その辺りに転がっていたボールを拾い上げた。";
+        let dump_from_game = "柊一郎「お嬢様なのに、趣味はおじさんなのか」妙花「おじさんってぇのは心外だが……まぁそうだな、こいつは家族の影響だろうから、そう言われても仕方がない」組長は、その辺りに転がっていたボールを拾い上げた。";
+
+        let mut s = Sim::new();
+        let t = s.read(0, 2000, &[line1, line2, line3]);
+        let o = s.line(t + 1000, dump_from_game);
+        assert!(o.emit.is_empty(), "Real world backlog dump leaked!");
+        assert_eq!(reasons(&o), vec![Reason::BacklogDump]);
+
+        // After backlog closes, next novel dialogue emits cleanly:
+        let next_line = "「これからどうするんだ？」";
+        let o_next = s.line(t + 4000, next_line);
+        assert_eq!(texts(&o_next.emit), vec![next_line]);
     }
 }
