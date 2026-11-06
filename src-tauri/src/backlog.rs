@@ -223,6 +223,23 @@ fn normalize(raw: &str) -> Normalized {
             prev_is_close_quote = false;
         } else if matches!(ch, '「' | '『') && matches!(last_sig, Some('」' | '』')) {
             buf.push('\n');
+        } else if matches!(ch, '「' | '『') {
+            // Segment break between narration and dialogue:
+            // e.g. "分からなかった。絵理子" -> split after "。" so "絵理子「..." starts as a new segment.
+            if let Some(last_punc_pos) = buf.rfind(['。', '！', '？', '」', '』']) {
+                let punc_char_len = buf[last_punc_pos..].chars().next().map_or(0, |c| c.len_utf8());
+                let after_punc = &buf[last_punc_pos + punc_char_len..];
+                if !after_punc.contains('\n') {
+                    let chars_after: Vec<char> = after_punc.chars().filter(|c| !c.is_whitespace()).collect();
+                    if chars_after.is_empty()
+                        || ((1..=12).contains(&chars_after.len())
+                            && !chars_after.iter().any(|&c| matches!(c, '、' | '!' | '?' | '.' | ',')))
+                    {
+                        let split_idx = last_punc_pos + punc_char_len;
+                        buf.insert(split_idx, '\n');
+                    }
+                }
+            }
         }
         if matches!(ch, '」' | '』') {
             prev_is_close_quote = true;
@@ -1159,6 +1176,25 @@ mod tests {
 
         // After backlog closes, next novel dialogue emits cleanly:
         let next_line = "「これからどうするんだ？」";
+        let o_next = s.line(t + 4000, next_line);
+        assert_eq!(texts(&o_next.emit), vec![next_line]);
+    }
+
+    #[test]
+    fn a5_narration_followed_by_dialogue_dump() {
+        let line1 = "「お医者さん嫌いみたいなね。でも性格の問題かしら、あたし必要ないって言われると追いかけたくなっちゃうのよ……！」";
+        let line2 = "オレは先生に会いたくて来てるので、会いたくない人の気持ちが分からなかった。";
+        let line3 = "絵理子「まぁ！　可愛いらしいこと言ってくれるじゃねーの、お主は～！」";
+        let dump_from_game = "絵理子「お医者さん嫌いみたいなね。でも性格の問題かしら、あたし必要ないって言われると追いかけたくなっちゃうのよ……！」オレは先生に会いたくて来てるので、会いたくない人の気持ちが分からなかった。絵理子「まぁ！　可愛いらしいこと言ってくれるじゃねーの、お主は～！」";
+
+        let mut s = Sim::new();
+        let t = s.read(0, 2000, &[line1, line2, line3]);
+        let o = s.line(t + 1000, dump_from_game);
+        assert!(o.emit.is_empty(), "Mixed narration/dialogue backlog dump leaked!");
+        assert_eq!(reasons(&o), vec![Reason::BacklogDump]);
+
+        // After backlog closes, next novel dialogue emits cleanly:
+        let next_line = "「次の患者さんどうぞ」";
         let o_next = s.line(t + 4000, next_line);
         assert_eq!(texts(&o_next.emit), vec![next_line]);
     }
