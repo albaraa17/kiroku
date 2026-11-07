@@ -153,7 +153,7 @@ Kiroku is built upon the foundational work of the visual novel reverse engineeri
 - **[LunaHook](https://github.com/AuroraWright/LunaHook)** by **AuroraWright** — The high-performance C++ text hooking core.
 - **[LunaTranslator](https://github.com/HIllya51/LunaTranslator)** by **HIllya51** — Tooling ecosystem and hook definitions.
 - **[Textractor](https://github.com/Artikash/Textractor)** by **Artikash** — Foundation of modern visual novel text hooking.
-- **[Tadoku](https://tadoku.app)** & **[exSTATic](https://github.com/Kuuuube/exSTATic)** — Inspiration for low-friction immersion reading workflows.
+- **[Tadoku](https://github.com/albaraa17/tadoku)** & **[exSTATic](https://github.com/Kuuuube/exSTATic)** — Inspiration for low-friction immersion reading workflows.
 
 ---
 
