@@ -201,6 +201,41 @@
                 )}
             />
           </div>
+
+          <div class="field-box">
+            <label for="skip-settle-input">
+              Fast-Skip Settle & Burst Window (ms)
+              <span class="hint">Quiet time to wait before sending the final landing line after a fast-skip wave (default: 120ms)</span>
+            </label>
+            <div class="slider-row">
+              <input
+                type="range"
+                min="40"
+                max="500"
+                step="10"
+                value={appStore.config.skip_settle_ms}
+                onchange={(e) =>
+                  updateConfigField(
+                    'skip_settle_ms',
+                    parseInt((e.currentTarget as HTMLInputElement).value, 10),
+                  )}
+              />
+              <input
+                id="skip-settle-input"
+                type="number"
+                min="30"
+                max="2000"
+                step="10"
+                value={appStore.config.skip_settle_ms}
+                onchange={(e) =>
+                  updateConfigField(
+                    'skip_settle_ms',
+                    parseInt((e.currentTarget as HTMLInputElement).value, 10),
+                  )}
+                class="num-input"
+              />
+            </div>
+          </div>
         </div>
 
         <div class="switches-grid">
@@ -384,6 +419,25 @@
                   updateConfigField(
                     'backlog_filter_enabled',
                     !appStore.config!.backlog_filter_enabled,
+                  )}
+              />
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="switch-card">
+            <div>
+              <strong>Fast-Skip Dump Protection (Landing Line Mode)</strong>
+              <p>Suppresses rapid 3+ line skip waves and concatenated multi-turn skip dumps as `[SKIP]`, sending only the final landing line once the settle timer expires</p>
+            </div>
+            <label class="switch">
+              <input
+                type="checkbox"
+                checked={appStore.config.skip_filter_enabled}
+                onchange={() =>
+                  updateConfigField(
+                    'skip_filter_enabled',
+                    !appStore.config!.skip_filter_enabled,
                   )}
               />
               <span class="slider"></span>

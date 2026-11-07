@@ -70,6 +70,14 @@
     });
   }
 
+  async function toggleSkipGuard() {
+    if (!appStore.config) return;
+    await appStore.saveConfig({
+      ...appStore.config,
+      skip_filter_enabled: !appStore.config.skip_filter_enabled,
+    });
+  }
+
   async function submitHookCode(e: SubmitEvent) {
     e.preventDefault();
     if (!hookcodeInput.trim()) return;
@@ -198,6 +206,16 @@
         >
           <i class="fa-solid fa-shield-halved"></i>
           Backlog Guard {appStore.config.backlog_filter_enabled ? 'ON' : 'OFF'}
+        </button>
+
+        <button
+          class="toggle-pill"
+          class:active={appStore.config.skip_filter_enabled}
+          onclick={toggleSkipGuard}
+          title="Fast-Skip Flood Protection (suppresses rapid skip bursts & multi-turn dumps, sending only the landing line after {appStore.config.skip_settle_ms}ms)"
+        >
+          <i class="fa-solid fa-forward-fast"></i>
+          Skip Guard {appStore.config.skip_filter_enabled ? 'ON' : 'OFF'}
         </button>
 
         <button
@@ -399,11 +417,15 @@
           </div>
         {:else}
           {#each [...selectedThread.history].reverse() as item (item.id)}
-            <div class="sentence-card" class:backlog-dimmed={item.is_backlog}>
+            <div class="sentence-card" class:backlog-dimmed={item.is_backlog || item.is_skip}>
               <div class="sentence-header">
                 <span class="sentence-time">{item.timestamp}</span>
                 <span class="sentence-chars">{item.char_count} chars</span>
-                {#if item.is_backlog}
+                {#if item.is_skip}
+                  <span class="skip-badge" title="Suppressed fast-skip flood line (blocked from exSTATic / clipboard; only the final landing line is sent)">
+                    <i class="fa-solid fa-forward-fast"></i> [SKIP]
+                  </span>
+                {:else if item.is_backlog}
                   <span class="backlog-badge" title="Suppressed backlog flood line (blocked from exSTATic / clipboard)">
                     <i class="fa-solid fa-clock-rotate-left"></i> [BACKLOG]
                   </span>
@@ -1011,6 +1033,20 @@
     background: rgba(247, 118, 142, 0.18);
     color: #f7768e;
     border: 1px solid rgba(247, 118, 142, 0.35);
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-weight: 700;
+    font-size: 0.72rem;
+    letter-spacing: 0.03em;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+  }
+
+  .skip-badge {
+    background: rgba(224, 175, 104, 0.18);
+    color: #e0af68;
+    border: 1px solid rgba(224, 175, 104, 0.38);
     padding: 1px 6px;
     border-radius: 4px;
     font-weight: 700;

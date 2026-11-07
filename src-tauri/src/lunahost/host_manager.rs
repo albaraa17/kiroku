@@ -152,6 +152,8 @@ pub struct SentenceEntry {
     pub char_count: usize,
     #[serde(default)]
     pub is_backlog: bool,
+    #[serde(default)]
+    pub is_skip: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -275,6 +277,13 @@ impl HostManager {
             }
         };
 
+        let detector_cfg = BacklogConfig {
+            backlog_filter_enabled: config.backlog_filter_enabled,
+            skip_filter_enabled: config.skip_filter_enabled,
+            skip_settle_window: Duration::from_millis(config.skip_settle_ms),
+            ..BacklogConfig::default()
+        };
+
         let manager = Arc::new(Self {
             app_handle,
             resources_dir,
@@ -293,7 +302,7 @@ impl HostManager {
             session_chars: std::sync::atomic::AtomicU64::new(0),
             session_sentences: std::sync::atomic::AtomicU64::new(0),
             manual_or_saved_locked: std::sync::atomic::AtomicBool::new(false),
-            detector: Mutex::new(BacklogDetector::new(BacklogConfig::default())),
+            detector: Mutex::new(BacklogDetector::new(detector_cfg)),
             pending_raw: Mutex::new(VecDeque::new()),
         });
 
@@ -766,6 +775,11 @@ impl HostManager {
             .set_forbidden_port(new_cfg.ws_broadcast_port);
         self.knife_client
             .update_config(new_cfg.knife_ws_enabled, &new_cfg.knife_ws_url);
+        self.detector.lock().set_filter_config(
+            new_cfg.backlog_filter_enabled,
+            new_cfg.skip_filter_enabled,
+            Duration::from_millis(new_cfg.skip_settle_ms),
+        );
         new_cfg.sync_windows_autostart();
         new_cfg.save(&self.config_path)?;
         *self.config.write() = new_cfg;
@@ -821,7 +835,7 @@ impl HostManager {
     fn spawn_event_loop(self: &Arc<Self>, mut rx: mpsc::UnboundedReceiver<HostEvent>) {
         let mgr = Arc::clone(self);
         tauri::async_runtime::spawn(async move {
-            let mut tick_interval = tokio::time::interval(Duration::from_millis(50));
+            let mut tick_interval = tokio::time::interval(Duration::from_millis(25));
             loop {
                 tokio::select! {
                     biased;
@@ -1061,6 +1075,7 @@ impl HostManager {
                             cleaned,
                             char_count: char_len,
                             is_backlog: false,
+                            is_skip: false,
                         });
                         if entry.history.len() > 80 {
                             let excess = entry.history.len() - 80;
@@ -1112,6 +1127,7 @@ impl HostManager {
                             cleaned,
                             char_count: char_len,
                             is_backlog: false,
+                            is_skip: false,
                         });
                         if entry.history.len() > 80 {
                             let excess = entry.history.len() - 80;
@@ -1168,7 +1184,7 @@ impl HostManager {
 
     fn handle_backlog_tick(&self) {
         let cfg = self.config.read().clone();
-        if !cfg.backlog_filter_enabled {
+        if !cfg.backlog_filter_enabled && !cfg.skip_filter_enabled {
             return;
         }
         let outcome = {
@@ -1201,32 +1217,40 @@ impl HostManager {
             let pid = entry.tp.process_id;
 
             for em in outcome.emit {
-                let raw = self
-                    .take_pending_raw(&em.text)
-                    .unwrap_or_else(|| em.text.clone());
-                let char_len = em.text.chars().filter(|c| !c.is_whitespace()).count();
+                let (raw, cleaned_em) = match self.take_pending_raw(&em.text) {
+                    Some(r) => (r, em.text.clone()),
+                    None => {
+                        let c = clean_sentence(&em.text, Some(&proc_path), &cfg);
+                        (
+                            em.text.clone(),
+                            if c.is_empty() { em.text.clone() } else { c },
+                        )
+                    }
+                };
+                let char_len = cleaned_em.chars().filter(|c| !c.is_whitespace()).count();
                 let id = self
                     .sentence_counter
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
 
                 entry.latest_raw = raw.clone();
-                entry.latest_cleaned = em.text.clone();
+                entry.latest_cleaned = cleaned_em.clone();
                 entry.total_sentences += 1;
                 entry.total_chars += char_len as u64;
                 entry.history.push(SentenceEntry {
                     id,
                     timestamp,
                     raw,
-                    cleaned: em.text.clone(),
+                    cleaned: cleaned_em.clone(),
                     char_count: char_len,
                     is_backlog: false,
+                    is_skip: false,
                 });
                 if entry.history.len() > 80 {
                     let excess = entry.history.len() - 80;
                     entry.history.drain(0..excess);
                 }
-                to_dispatch.push((pid, proc_path.clone(), em.text));
+                to_dispatch.push((pid, proc_path.clone(), cleaned_em));
                 changed = true;
             }
 
@@ -1243,6 +1267,7 @@ impl HostManager {
                     .sentence_counter
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
+                let is_skip = reason.is_skip();
 
                 entry.latest_raw = raw.clone();
                 entry.latest_cleaned = suppressed_cand.text.clone();
@@ -1252,7 +1277,8 @@ impl HostManager {
                     raw,
                     cleaned: suppressed_cand.text.clone(),
                     char_count: char_len,
-                    is_backlog: true,
+                    is_backlog: !is_skip,
+                    is_skip,
                 });
                 if entry.history.len() > 80 {
                     let excess = entry.history.len() - 80;
@@ -1287,7 +1313,7 @@ impl HostManager {
         cleaned: String,
         cfg: &AppConfig,
     ) {
-        if !cfg.backlog_filter_enabled {
+        if !cfg.backlog_filter_enabled && !cfg.skip_filter_enabled {
             let char_len = cleaned.chars().filter(|c| !c.is_whitespace()).count();
             let id = self
                 .sentence_counter
@@ -1307,6 +1333,7 @@ impl HostManager {
                         cleaned: cleaned.clone(),
                         char_count: char_len,
                         is_backlog: false,
+                        is_skip: false,
                     });
                     if entry.history.len() > 80 {
                         let excess = entry.history.len() - 80;
@@ -1335,36 +1362,44 @@ impl HostManager {
             if let Some(entry) = threads.get_mut(key) {
                 // 1. Emit(lines) -> send each line in order to the WebSocket/clipboard and UI as normal.
                 for em in outcome.emit {
-                    let raw = self
-                        .take_pending_raw(&em.text)
-                        .unwrap_or_else(|| em.text.clone());
-                    let char_len = em.text.chars().filter(|c| !c.is_whitespace()).count();
+                    let (raw, cleaned_em) = match self.take_pending_raw(&em.text) {
+                        Some(r) => (r, em.text.clone()),
+                        None => {
+                            let c = clean_sentence(&em.text, Some(&proc_path), cfg);
+                            (
+                                em.text.clone(),
+                                if c.is_empty() { em.text.clone() } else { c },
+                            )
+                        }
+                    };
+                    let char_len = cleaned_em.chars().filter(|c| !c.is_whitespace()).count();
                     let id = self
                         .sentence_counter
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
 
                     entry.latest_raw = raw.clone();
-                    entry.latest_cleaned = em.text.clone();
+                    entry.latest_cleaned = cleaned_em.clone();
                     entry.total_sentences += 1;
                     entry.total_chars += char_len as u64;
                     entry.history.push(SentenceEntry {
                         id,
                         timestamp,
                         raw,
-                        cleaned: em.text.clone(),
+                        cleaned: cleaned_em.clone(),
                         char_count: char_len,
                         is_backlog: false,
+                        is_skip: false,
                     });
                     if entry.history.len() > 80 {
                         let excess = entry.history.len() - 80;
                         entry.history.drain(0..excess);
                     }
-                    to_dispatch.push((pid, proc_path.clone(), em.text));
+                    to_dispatch.push((pid, proc_path.clone(), cleaned_em));
                     changed = true;
                 }
 
-                // 2. Suppress(reason) -> block from WebSocket/clipboard, but still emit a Tauri event to the frontend UI so the line can be displayed dimmed with a [BACKLOG] badge.
+                // 2. Suppress(reason) -> block from WebSocket/clipboard, but still emit a Tauri event to the frontend UI so the line can be displayed dimmed with a [BACKLOG] or [SKIP] badge.
                 for (suppressed_cand, reason) in outcome.suppressed {
                     let raw = self
                         .take_pending_raw(&suppressed_cand.text)
@@ -1378,6 +1413,7 @@ impl HostManager {
                         .sentence_counter
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
+                    let is_skip = reason.is_skip();
 
                     entry.latest_raw = raw.clone();
                     entry.latest_cleaned = suppressed_cand.text.clone();
@@ -1387,7 +1423,8 @@ impl HostManager {
                         raw,
                         cleaned: suppressed_cand.text.clone(),
                         char_count: char_len,
-                        is_backlog: true,
+                        is_backlog: !is_skip,
+                        is_skip,
                     });
                     if entry.history.len() > 80 {
                         let excess = entry.history.len() - 80;

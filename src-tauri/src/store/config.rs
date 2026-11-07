@@ -69,6 +69,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_skip_settle_ms() -> u64 {
+    120
+}
+
 pub fn next_rule_id(prefix: &str) -> String {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -217,6 +221,10 @@ pub struct AppConfig {
     pub hide_garbage_threads: bool,
     #[serde(default = "default_true")]
     pub backlog_filter_enabled: bool,
+    #[serde(default = "default_true")]
+    pub skip_filter_enabled: bool,
+    #[serde(default = "default_skip_settle_ms")]
+    pub skip_settle_ms: u64,
 
     pub regex_filters: Vec<RegexFilterRule>,
     pub regex_replacements: Vec<RegexReplaceRule>,
@@ -265,6 +273,8 @@ impl Default for AppConfig {
             normalize_whitespace: true,
             hide_garbage_threads: false,
             backlog_filter_enabled: true,
+            skip_filter_enabled: true,
+            skip_settle_ms: 120,
 
             regex_filters: Vec::new(),
             regex_replacements: Vec::new(),
@@ -336,6 +346,7 @@ impl AppConfig {
         if self.default_codepage <= 0 {
             self.default_codepage = 932;
         }
+        self.skip_settle_ms = self.skip_settle_ms.clamp(30, 2000);
     }
 
     pub fn load_or_init(config_file: &Path, defaults_dir: Option<&Path>) -> Self {

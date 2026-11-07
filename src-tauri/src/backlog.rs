@@ -60,6 +60,16 @@ pub enum Reason {
     BacklogScroll,
     /// Forward contiguous replay of recent history (load + skip re-read).
     BacklogRun,
+    /// Intermediate line suppressed during a rapid-fire skip wave (3+ fast lines).
+    SkipBurst,
+    /// Earlier turns suppressed from a single-event concatenated multi-turn skip dump.
+    SkipDump,
+}
+
+impl Reason {
+    pub fn is_skip(self) -> bool {
+        matches!(self, Reason::SkipBurst | Reason::SkipDump)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,6 +120,12 @@ pub struct Config {
     /// Policy: suppress forward replays of recent history (load save + skip).
     pub suppress_rereads: bool,
     pub suppressed_ring_cap: usize,
+    /// Policy: suppress backlog dumps, scroll replays, and redraws.
+    pub backlog_filter_enabled: bool,
+    /// Policy: suppress rapid-fire skip waves and multi-turn skip dumps, emitting only the landing line.
+    pub skip_filter_enabled: bool,
+    /// Settle / burst window for skip waves (default 120ms, configurable via Settings slider).
+    pub skip_settle_window: Duration,
 }
 
 impl Default for Config {
@@ -137,6 +153,9 @@ impl Default for Config {
             thread_match_ratio: 0.9,
             suppress_rereads: true,
             suppressed_ring_cap: 32,
+            backlog_filter_enabled: true,
+            skip_filter_enabled: false,
+            skip_settle_window: Duration::from_millis(120),
         }
     }
 }
@@ -290,6 +309,112 @@ fn normalize(raw: &str) -> Normalized {
     }
     n.weight = weight_of(&n.key);
     n
+}
+
+fn starts_with_speaker_before_quote(s: &str) -> bool {
+    let line = s.split('\n').next().unwrap_or("");
+    if let Some(rest) = line.strip_prefix('【') {
+        if let Some(end) = rest.find('】') {
+            let name_chars = rest[..end].chars().filter(|c| !c.is_whitespace()).count();
+            return (1..=16).contains(&name_chars);
+        }
+    }
+    if let Some(q_idx) = line.find(['「', '『']) {
+        if q_idx > 0 {
+            let prefix = &line[..q_idx];
+            let prefix_chars: Vec<char> = prefix.chars().filter(|c| !c.is_whitespace()).collect();
+            if (1..=12).contains(&prefix_chars.len())
+                && !prefix_chars.iter().any(|&c| {
+                    matches!(
+                        c,
+                        '。' | '、' | '！' | '？' | '!' | '?' | '.' | ',' | '「' | '」' | '『' | '』' | '…' | '―' | '—'
+                    )
+                })
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Structural-only splitter for single-event concatenated skip dumps (never splits by character length).
+/// Returns `Some((suppressed_prefix_turns, final_landing_turn))` when a single hook emission contains:
+/// - 3+ distinct turns where at least 2 are dialogue turns (`「...」` / `『...』`), OR
+/// - 3+ speaker-tagged turns (`【Name】` / `Name「`).
+pub fn split_multiturn_skip_dump(raw: &str) -> Option<(String, String)> {
+    let clean_lf = raw.replace("\r\n", "\n").replace('\r', "\n");
+    let mut buf = String::with_capacity(clean_lf.len() + 16);
+    let mut quote_depth = 0usize;
+    let mut turn_has_speaker = starts_with_speaker_before_quote(clean_lf.trim_start());
+
+    for (idx, ch) in clean_lf.char_indices() {
+        buf.push(ch);
+        if ch == '\n' {
+            quote_depth = 0;
+            let rest = clean_lf[idx + ch.len_utf8()..].trim_start_matches(|c: char| c.is_whitespace() && c != '\n');
+            turn_has_speaker = starts_with_speaker_before_quote(rest);
+            continue;
+        }
+        if matches!(ch, '「' | '『') {
+            quote_depth += 1;
+            continue;
+        }
+        if matches!(ch, '」' | '』') {
+            quote_depth = quote_depth.saturating_sub(1);
+            if quote_depth == 0 {
+                let rest = &clean_lf[idx + ch.len_utf8()..];
+                let trimmed = rest.trim_start_matches(|c: char| c.is_whitespace() && c != '\n');
+                if !trimmed.is_empty() && !trimmed.starts_with('\n') {
+                    let next_is_quote_or_bracket = trimmed.starts_with(['「', '『', '【']);
+                    let next_is_speaker = starts_with_speaker_before_quote(trimmed);
+                    if next_is_quote_or_bracket || next_is_speaker || turn_has_speaker {
+                        buf.push('\n');
+                        turn_has_speaker = next_is_speaker || trimmed.starts_with('【');
+                    }
+                }
+            }
+            continue;
+        }
+        if quote_depth == 0 && matches!(ch, '。' | '！' | '？') {
+            let rest = &clean_lf[idx + ch.len_utf8()..];
+            let trimmed = rest.trim_start_matches(|c: char| c.is_whitespace() && c != '\n');
+            if !trimmed.is_empty() && !trimmed.starts_with('\n') {
+                let next_is_speaker = starts_with_speaker_before_quote(trimmed);
+                if trimmed.starts_with(['「', '『', '【']) || next_is_speaker {
+                    buf.push('\n');
+                    turn_has_speaker = next_is_speaker || trimmed.starts_with('【');
+                }
+            }
+        }
+    }
+
+    let mut turns: Vec<&str> = Vec::new();
+    let mut quoted_turns = 0usize;
+    let mut speaker_turns = 0usize;
+
+    for line in buf.split('\n') {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if t.contains(['「', '『']) && t.contains(['」', '』']) {
+            quoted_turns += 1;
+        }
+        if starts_with_speaker_before_quote(t) {
+            speaker_turns += 1;
+        }
+        turns.push(t);
+    }
+
+    let is_multiturn_dump = (turns.len() >= 3 && quoted_turns >= 2) || speaker_turns >= 3;
+    if !is_multiturn_dump {
+        return None;
+    }
+
+    let last_turn = turns.pop()?.to_string();
+    let prefix_dump = turns.join("\n");
+    Some((prefix_dump, last_turn))
 }
 
 // ───────────────────────────── history ─────────────────────────────
@@ -526,6 +651,13 @@ struct Emitted {
     novel: bool,
 }
 
+#[derive(Debug)]
+struct SkipTail {
+    cand: Candidate,
+    key: String,
+    deadline: Instant,
+}
+
 #[derive(Debug, Default)]
 struct ThreadStats {
     novel: u32,
@@ -548,6 +680,9 @@ pub struct BacklogDetector {
     primary_thread: Option<ThreadKey>,
     last_emitted: Option<Emitted>,
     last_event_at: Option<Instant>,
+    last_novel_at: Option<Instant>,
+    skip_burst_count: usize,
+    skip_tail: Option<SkipTail>,
     last_repeat: Option<(u64, Instant)>,
     last_input_at: Option<Instant>,
     suppressed_ring: VecDeque<Candidate>,
@@ -570,10 +705,26 @@ impl BacklogDetector {
             primary_thread: None,
             last_emitted: None,
             last_event_at: None,
+            last_novel_at: None,
+            skip_burst_count: 0,
+            skip_tail: None,
             last_repeat: None,
             last_input_at: None,
             suppressed_ring: VecDeque::new(),
         }
+    }
+
+    /// Updates the backlog and fast-skip flood guard configuration on the fly.
+    pub fn set_filter_config(&mut self, backlog_enabled: bool, skip_enabled: bool, settle_window: Duration) {
+        self.cfg.backlog_filter_enabled = backlog_enabled;
+        self.cfg.skip_filter_enabled = skip_enabled;
+        self.cfg.skip_settle_window = settle_window;
+    }
+
+    /// Updates the fast-skip flood guard configuration on the fly.
+    pub fn set_skip_config(&mut self, enabled: bool, settle_window: Duration) {
+        self.cfg.skip_filter_enabled = enabled;
+        self.cfg.skip_settle_window = settle_window;
     }
 
     /// The user-selected dialogue thread; never auto-classified as backlog.
@@ -634,6 +785,20 @@ impl BacklogDetector {
         if end_backlog {
             self.mode = Mode::Live;
         }
+        if self.skip_tail.as_ref().is_some_and(|t| now >= t.deadline) {
+            if let Some(tail) = self.skip_tail.take() {
+                self.skip_burst_count = 0;
+                if let Some(seq) = self.history.tail() {
+                    self.last_emitted = Some(Emitted {
+                        key: tail.key,
+                        seq,
+                        at: tail.cand.at,
+                        novel: true,
+                    });
+                }
+                out.emit.push(tail.cand);
+            }
+        }
         out
     }
 
@@ -660,13 +825,31 @@ impl BacklogDetector {
 
         let a = analyze(&n, &self.history, &self.names, &self.cfg);
 
+        // When backlog filter is disabled, treat all non-redraw lines as live emissions
+        // (still subject to skip_filter_enabled if active).
+        if !self.cfg.backlog_filter_enabled {
+            self.flush_pending(&mut out);
+            self.mode = Mode::Live;
+            if self.cfg.skip_filter_enabled {
+                self.handle_novel_with_skip_guard(c, &n, &a, now, &mut out);
+            } else {
+                self.accept(&n, &a, now);
+                out.emit.push(c);
+            }
+            return out;
+        }
+
         // Gate 1: novelty veto.
         if a.residual_w >= self.cfg.novel_min_weight || a.suffix_novel {
             self.note_thread(c.thread, Class::Novel);
             self.flush_pending(&mut out);
-            self.accept(&n, &a, now);
             self.mode = Mode::Live;
-            out.emit.push(c);
+            if self.cfg.skip_filter_enabled {
+                self.handle_novel_with_skip_guard(c, &n, &a, now, &mut out);
+            } else {
+                self.accept(&n, &a, now);
+                out.emit.push(c);
+            }
             return out;
         }
 
@@ -682,14 +865,88 @@ impl BacklogDetector {
         // Low-information but not a repeat (e.g. a new 「え？」): emit.
         if !repeat {
             self.flush_pending(&mut out);
-            self.accept(&n, &a, now);
             self.mode = Mode::Live;
-            out.emit.push(c);
+            if self.cfg.skip_filter_enabled {
+                self.handle_novel_with_skip_guard(c, &n, &a, now, &mut out);
+            } else {
+                self.accept(&n, &a, now);
+                out.emit.push(c);
+            }
             return out;
         }
 
         self.score_repeat(c, &n, &a, prev_event, &mut out);
         out
+    }
+
+    fn handle_novel_with_skip_guard(
+        &mut self,
+        c: Candidate,
+        n: &Normalized,
+        a: &Analysis,
+        now: Instant,
+        out: &mut Outcome,
+    ) {
+        let settle = self.cfg.skip_settle_window;
+
+        // 1. Single-event concatenated multi-turn skip dump (3+ dialogue turns in one flush)
+        if let Some((prefix_dump, last_turn)) = split_multiturn_skip_dump(&c.text) {
+            self.accept(n, a, now);
+            self.last_novel_at = Some(now);
+            self.skip_burst_count = self.skip_burst_count.saturating_add(2).max(3);
+
+            if let Some(prev_tail) = self.skip_tail.take() {
+                self.suppress(out, prev_tail.cand, Reason::SkipBurst);
+            }
+
+            self.suppress(
+                out,
+                Candidate::new(prefix_dump, c.thread, now),
+                Reason::SkipDump,
+            );
+
+            let last_norm = normalize(&last_turn);
+            self.skip_tail = Some(SkipTail {
+                cand: Candidate::new(last_turn, c.thread, now),
+                key: last_norm.key,
+                deadline: now + settle,
+            });
+            out.held = true;
+            return;
+        }
+
+        // 2. Single-turn novel line
+        self.accept(n, a, now);
+        let prev_novel_at = self.last_novel_at.replace(now);
+
+        // Case A: A skip_tail is still waiting (line 3+ of a rapid skip wave, or line after SkipDump)
+        if let Some(prev_tail) = self.skip_tail.take() {
+            self.skip_burst_count += 1;
+            self.suppress(out, prev_tail.cand, Reason::SkipBurst);
+            self.skip_tail = Some(SkipTail {
+                cand: c,
+                key: n.key.clone(),
+                deadline: now + settle,
+            });
+            out.held = true;
+            return;
+        }
+
+        // Case B: Line 2 arriving within settle window of Line 1 -> hold in skip_tail
+        if prev_novel_at.is_some_and(|prev| now.saturating_duration_since(prev) < settle) {
+            self.skip_burst_count = 2;
+            self.skip_tail = Some(SkipTail {
+                cand: c,
+                key: n.key.clone(),
+                deadline: now + settle,
+            });
+            out.held = true;
+            return;
+        }
+
+        // Case C: Normal reading pace (Line 1 after quiet gap >= settle) -> emit at 0ms
+        self.skip_burst_count = 1;
+        out.emit.push(c);
     }
 
     fn score_repeat(&mut self, c: Candidate, n: &Normalized, a: &Analysis, prev_event: Option<Instant>, out: &mut Outcome) {
@@ -790,6 +1047,11 @@ impl BacklogDetector {
         if let Mode::Pending { key: k, anchor, .. } = &self.mode {
             if k == key {
                 return Some(*anchor);
+            }
+        }
+        if let Some(tail) = &self.skip_tail {
+            if tail.key == key {
+                return self.history.tail().or(Some(0));
             }
         }
         let e = self.last_emitted.as_ref()?;
@@ -1197,5 +1459,100 @@ mod tests {
         let next_line = "「次の患者さんどうぞ」";
         let o_next = s.line(t + 4000, next_line);
         assert_eq!(texts(&o_next.emit), vec![next_line]);
+    }
+
+    // 10 ─ Fast-Skip Wave (3+ novel lines in rapid succession):
+    //      Line 1 emits at 0ms, intermediate lines suppressed as SkipBurst, final landing line emits after settle window.
+    #[test]
+    fn s10_skip_wave_suppresses_intermediate_lines_and_emits_landing_line() {
+        let mut s = Sim::with(Config {
+            skip_filter_enabled: true,
+            skip_settle_window: Duration::from_millis(120),
+            ..Config::default()
+        });
+        let t = s.read(0, 2000, &STORY[..5]);
+
+        // Start fast-skip at t + 2000: 6 unread lines spaced 25ms apart
+        let base = t + 2000;
+        let o0 = s.line(base, STORY[5]);
+        assert_eq!(texts(&o0.emit), vec![STORY[5]], "First line must emit at 0ms");
+        assert!(o0.suppressed.is_empty());
+
+        let mut suppressed_lines = Vec::new();
+        for (k, &line) in STORY[6..11].iter().enumerate() {
+            let o = s.line(base + (k as u64 + 1) * 25, line);
+            assert!(o.emit.is_empty(), "Intermediate skip line must not emit immediately");
+            assert!(o.held);
+            for (cand, reason) in o.suppressed {
+                assert_eq!(reason, Reason::SkipBurst);
+                suppressed_lines.push(cand.text);
+            }
+        }
+
+        // STORY[6..10] (4 lines) should have been suppressed as SkipBurst while STORY[10] is held as landing line
+        assert_eq!(
+            suppressed_lines,
+            STORY[6..10].iter().map(|s| s.to_string()).collect::<Vec<_>>()
+        );
+
+        // Once 120ms settle window expires after the last line (base + 5*25 + 130), STORY[10] emits!
+        let o_land = s.tick(base + 5 * 25 + 130);
+        assert_eq!(texts(&o_land.emit), vec![STORY[10]], "Landing line must emit after settle timer");
+    }
+
+    // 11 ─ Quick 2-line double-tap (only 2 lines within settle window) does NOT suppress the 2nd line.
+    #[test]
+    fn s11_quick_double_tap_two_lines_does_not_suppress() {
+        let mut s = Sim::with(Config {
+            skip_filter_enabled: true,
+            skip_settle_window: Duration::from_millis(120),
+            ..Config::default()
+        });
+        let o1 = s.line(1000, STORY[0]);
+        assert_eq!(texts(&o1.emit), vec![STORY[0]]);
+
+        let o2 = s.line(1050, STORY[1]);
+        assert!(o2.emit.is_empty() && o2.held && o2.suppressed.is_empty());
+
+        let o_tick = s.tick(1200);
+        assert_eq!(texts(&o_tick.emit), vec![STORY[1]]);
+        assert!(o_tick.suppressed.is_empty());
+    }
+
+    // 12 ─ Single-event concatenated multi-turn skip dump suppresses bulk turns and emits only the landing turn.
+    #[test]
+    fn s12_concatenated_multiturn_skip_dump_suppresses_bulk_and_emits_tail() {
+        let mut s = Sim::with(Config {
+            skip_filter_enabled: true,
+            skip_settle_window: Duration::from_millis(120),
+            ..Config::default()
+        });
+        let dump = "柊一郎「お嬢様なのに、趣味はおじさんなのか」妙花「おじさんってぇのは心外だが……まぁそうだな」組長「さて、そろそろ本題に入ろうか」";
+        let o = s.line(1000, dump);
+        assert!(o.emit.is_empty() && o.held);
+        assert_eq!(reasons(&o), vec![Reason::SkipDump]);
+        assert_eq!(
+            o.suppressed[0].0.text,
+            "柊一郎「お嬢様なのに、趣味はおじさんなのか」\n妙花「おじさんってぇのは心外だが……まぁそうだな」"
+        );
+
+        // After settle window expires, only the final landing turn is emitted:
+        let o_land = s.tick(1150);
+        assert_eq!(texts(&o_land.emit), vec!["組長「さて、そろそろ本題に入ろうか」"]);
+    }
+
+    // 13 ─ Single long monologue (350+ chars, no multi-turn skip dump structure) is never split or suppressed.
+    #[test]
+    fn s13_long_monologue_over_300_chars_is_never_split_or_suppressed() {
+        let mut s = Sim::with(Config {
+            skip_filter_enabled: true,
+            skip_settle_window: Duration::from_millis(120),
+            ..Config::default()
+        });
+        let long_line = "「あの日の夕暮れ、駅のホームで君が言った言葉を今でも鮮明に覚えている。風が強く吹いていて、遠くの踏切の警報機が鳴り響く中で、僕たちは何も言えずにただ立ち尽くしていた。季節がいくつも巡って、街の景色がどれだけ変わってしまっても、あの瞬間の温度だけは決して消えることがないのだと、今になってようやく気がついたんだ。これからもずっと、忘れることはないだろう。」";
+        assert!(long_line.chars().count() > 160);
+        let o = s.line(2000, long_line);
+        assert_eq!(texts(&o.emit), vec![long_line], "Long single-turn dialogue must emit at 0ms untouched");
+        assert!(o.suppressed.is_empty() && !o.held);
     }
 }

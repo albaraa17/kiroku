@@ -84,6 +84,8 @@ export interface AppConfig {
   normalize_whitespace: boolean;
   hide_garbage_threads: boolean;
   backlog_filter_enabled: boolean;
+  skip_filter_enabled: boolean;
+  skip_settle_ms: number;
 
   regex_filters: RegexFilterRule[];
   regex_replacements: RegexReplaceRule[];
@@ -122,6 +124,7 @@ export interface SentenceEntry {
   cleaned: string;
   char_count: number;
   is_backlog?: boolean;
+  is_skip?: boolean;
 }
 
 export interface HookThreadView {
